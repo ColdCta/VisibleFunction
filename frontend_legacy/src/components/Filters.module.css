@@ -1,0 +1,63 @@
+.filters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.typeRow {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.selectRow {
+  display: flex;
+  gap: 6px;
+}
+
+.chip {
+  background: var(--vf-panel-raised);
+  color: var(--vf-text-dim);
+  border: 1px solid var(--vf-border);
+  border-radius: 3px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-family: var(--vf-mono);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  color: var(--vf-text);
+  border-color: var(--vf-border-hover);
+}
+
+.chipActive {
+  background: var(--vf-accent-bg);
+  color: var(--vf-accent-fg);
+  border-color: var(--vf-accent-fg);
+}
+
+.select {
+  flex: 1;
+  min-width: 0;
+  background: var(--vf-panel-raised);
+  color: var(--vf-text);
+  border: 1px solid var(--vf-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-family: var(--vf-mono);
+  height: 24px;
+  cursor: pointer;
+  outline: none;
+}
+
+.select:hover {
+  border-color: var(--vf-border-hover);
+}
+
+.select:focus {
+  border-color: var(--vf-accent-fg);
+}

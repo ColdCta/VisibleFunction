@@ -1,0 +1,23 @@
+.scrollContainer {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  width: 100%;
+}
+
+.rowWrapper {
+  cursor: pointer;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 120px;
+  width: 100%;
+  color: var(--vf-muted);
+  font-size: 13px;
+  padding: 16px;
+  text-align: center;
+}

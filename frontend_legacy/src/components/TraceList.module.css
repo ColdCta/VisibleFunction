@@ -1,0 +1,134 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--vf-panel);
+  border: 1px solid var(--vf-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--vf-border);
+  background: var(--vf-panel-raised);
+  flex-shrink: 0;
+  height: 30px;
+}
+
+.count {
+  font-size: 11px;
+  font-family: var(--vf-mono);
+  color: var(--vf-accent-fg);
+}
+
+.orderButton {
+  background: transparent;
+  border: 1px solid var(--vf-border);
+  color: var(--vf-text-dim);
+  font-size: 11px;
+  font-family: var(--vf-mono);
+  padding: 1px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.orderButton:hover {
+  color: var(--vf-text);
+  border-color: var(--vf-border-hover);
+}
+
+.listArea {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--vf-border);
+  height: 44px;
+  box-sizing: border-box;
+}
+
+.row:hover {
+  background: var(--vf-row-hover);
+}
+
+.rowSelected {
+  background: var(--vf-row-selected);
+  border-left: 2px solid var(--vf-accent-fg);
+  padding-left: 8px;
+}
+
+.rowMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.id {
+  font-size: 11px;
+  font-family: var(--vf-mono);
+  color: var(--vf-muted);
+  flex-shrink: 0;
+  width: 44px;
+}
+
+.subject {
+  font-size: 12px;
+  font-family: var(--vf-mono);
+  color: var(--vf-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.rowSub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 52px;
+  min-width: 0;
+}
+
+.summary {
+  font-size: 11px;
+  color: var(--vf-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.function {
+  font-size: 10px;
+  font-family: var(--vf-mono);
+  color: var(--vf-function-fg);
+  background: var(--vf-function-bg);
+  padding: 0 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source {
+  font-size: 10px;
+  font-family: var(--vf-mono);
+  color: var(--vf-muted);
+  flex-shrink: 0;
+}

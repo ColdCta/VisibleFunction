@@ -1,0 +1,30 @@
+{
+	"schemaVersion": 1,
+	"id": "visiblefunction",
+	"version": "${version}",
+	"name": "VisibleFunction",
+	"description": "A Fabric mod for Minecraft 26.2.",
+	"authors": [
+		"wejw1"
+	],
+	"contact": {},
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.visiblefunction.VisibleFunction"
+		],
+		"client": [
+			"com.visiblefunction.VisibleFunctionClient"
+		]
+	},
+	"mixins": [
+		"visiblefunction.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

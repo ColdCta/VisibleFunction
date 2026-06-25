@@ -1,0 +1,40 @@
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-family: var(--vf-mono);
+  line-height: 1.5;
+}
+
+.default {
+  background: var(--vf-badge-bg);
+  color: var(--vf-badge-fg);
+}
+
+.accent {
+  background: var(--vf-accent-bg);
+  color: var(--vf-accent-fg);
+}
+
+.muted {
+  background: var(--vf-muted-bg);
+  color: var(--vf-muted);
+}
+
+.command {
+  background: var(--vf-command-bg);
+  color: var(--vf-command-fg);
+}
+
+.event {
+  background: var(--vf-event-bg);
+  color: var(--vf-event-fg);
+}
+
+.function {
+  background: var(--vf-function-bg);
+  color: var(--vf-function-fg);
+}

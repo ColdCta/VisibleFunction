@@ -1,0 +1,28 @@
+{
+	"required": true,
+	"package": "com.visiblefunction.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"BaseCommandBlockMixin",
+		"CallFunctionMixin",
+		"CommandSourceStackAccessor",
+		"DataCommandsMixin",
+		"EffectCommandsMixin",
+		"ExecuteCommandMixin",
+		"GiveCommandMixin",
+		"KillCommandMixin",
+		"ScoreboardCommandMixin",
+		"ServerExecuteCommandMixin",
+		"ServerFunctionManagerMixin",
+		"StorageDataAccessorAccessor",
+		"SummonCommandMixin",
+		"TagCommandMixin",
+		"TeleportCommandMixin"
+	],
+	"client": [
+		"KeyboardHandlerMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
