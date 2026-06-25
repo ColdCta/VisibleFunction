@@ -167,7 +167,10 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
     const raw = localStorage.getItem(MOCK_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as TraceRecord[];
-      if (Array.isArray(parsed) && parsed.length > 0) records = parsed;
+      const recent = Array.isArray(parsed) ? parsed.slice(-200) : [];
+      if (Array.isArray(parsed) && parsed.length > 0 && recent.some((record) => record.type === "EVENT")) {
+        records = parsed;
+      }
     }
   } catch {
     /* ignore */
@@ -193,7 +196,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
       return realFetch!(input as RequestInfo, init);
     }
     const path = url.slice(client.getBaseUrl().length).split("?")[0];
-    const u = new URL(url);
+    const u = new URL(url, window.location.origin);
     const after = Number(u.searchParams.get("after") ?? "0");
     const limit = Number(u.searchParams.get("limit") ?? "5000");
     const tail = u.searchParams.get("tail") === "true" || u.searchParams.get("tail") === "1";

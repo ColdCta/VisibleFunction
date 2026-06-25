@@ -12,6 +12,7 @@ export function TopBar() {
   const activeRecording = useTraceStore((s) => s.activeRecording);
   const recordingStatus = useTraceStore((s) => s.recordingStatus);
   const setBaseUrl = useTraceStore((s) => s.setBaseUrl);
+  const connect = useTraceStore((s) => s.connect);
   const baseUrl = useTraceStore((s) => s.baseUrl);
   const openLive = useTraceStore((s) => s.openLive);
   const openRecordings = useTraceStore((s) => s.openRecordings);
@@ -109,7 +110,7 @@ export function TopBar() {
                   setBaseUrl(urlDraft);
                   setSettingsOpen(false);
                   if (mode === "live") {
-                    void openLive();
+                    void connect();
                   } else {
                     void openRecordings();
                   }

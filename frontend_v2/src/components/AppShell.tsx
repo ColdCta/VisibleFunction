@@ -6,6 +6,7 @@ import { Timeline } from "./Timeline/Timeline";
 import { DetailPanel } from "./DetailPanel";
 import { StatusBar } from "./StatusBar";
 import { RecordingLibrary } from "./RecordingLibrary";
+import { RelationshipGraphOverlay } from "./RelationshipGraphOverlay";
 
 // Module-level guard: StrictMode invokes effects twice in dev; this ensures connect() runs once.
 let didBootstrap = false;
@@ -15,6 +16,8 @@ export function AppShell() {
   const setSelection = useTraceStore((s) => s.setSelection);
   const selection = useTraceStore((s) => s.selection);
   const setFilters = useTraceStore((s) => s.setFilters);
+  const relationshipGraphEventId = useTraceStore((s) => s.relationshipGraphEventId);
+  const closeRelationshipGraph = useTraceStore((s) => s.closeRelationshipGraph);
 
   // Bootstrap: auto-connect to the backend on first mount when in live mode. Previously the app
   // started disconnected and only connected after the user clicked the "Live Monitor" tab, which
@@ -46,13 +49,14 @@ export function AppShell() {
         return;
       }
       if (e.key === "Escape") {
-        if (selection) setSelection(null);
+        if (relationshipGraphEventId != null) closeRelationshipGraph();
+        else if (selection) setSelection(null);
         else setFilters({ search: "" });
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selection, setSelection, setFilters]);
+  }, [closeRelationshipGraph, relationshipGraphEventId, selection, setSelection, setFilters]);
 
   return (
     <div className="shell">
@@ -62,6 +66,7 @@ export function AppShell() {
         {mode === "recordings" ? <RecordingLibrary /> : <Timeline />}
         <DetailPanel />
       </div>
+      <RelationshipGraphOverlay />
       <StatusBar />
     </div>
   );

@@ -23,6 +23,7 @@ export function Timeline() {
   const range = useTraceStore((s) => s.range);
   const selection = useTraceStore((s) => s.selection);
   const setSelection = useTraceStore((s) => s.setSelection);
+  const openRelationshipGraph = useTraceStore((s) => s.openRelationshipGraph);
   const highlightIds = useTraceStore((s) => s.highlightIds);
   const connection = useTraceStore((s) => s.connection);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -115,6 +116,13 @@ export function Timeline() {
     setRange(lo, hi);
   }
 
+  function selectEventRecord(record: TraceRecord) {
+    setSelection({ kind: "record", id: record.id });
+    if (record.type === "EVENT") {
+      openRelationshipGraph(record.id);
+    }
+  }
+
   const empty = visibleBuckets.length === 0;
   const totalWidth = visibleBuckets.length * COLUMN_WIDTH;
 
@@ -167,7 +175,7 @@ export function Timeline() {
             <TickLane buckets={visibleSlice} hideIdle={filters.hideIdleTicks} enabled={filters.tick} currentBucketKey={currentBucketKey} offset={colStart} />
             <EventLane
               buckets={visibleSlice}
-              onSelect={(r) => setSelection({ kind: "record", id: r.id })}
+              onSelect={selectEventRecord}
               onZoom={(r) => zoomToTick(recordTick(r))}
               highlightIds={highlightIds}
               currentBucketKey={currentBucketKey}

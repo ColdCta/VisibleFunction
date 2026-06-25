@@ -564,6 +564,429 @@
 .detail__nav { display: flex; justify-content: space-between; margin-top: 16px; gap: 8px; }
 .detail__nav button { flex: 1 1 auto; }
 
+/* === Event relationship graph === */
+.relationship-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(3, 7, 12, 0.68);
+  backdrop-filter: blur(3px);
+}
+
+.relationship-modal__panel {
+  width: min(1400px, calc(100vw - 72px));
+  height: min(820px, calc(100vh - 72px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0b111a;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.62);
+}
+
+.relationship-modal__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 64px;
+  padding: 10px 14px 10px 18px;
+  border-bottom: 1px solid var(--panel-border);
+  background: linear-gradient(180deg, rgba(17, 25, 35, 0.98), rgba(12, 18, 27, 0.98));
+}
+
+.relationship-modal__heading {
+  min-width: 0;
+}
+
+.relationship-modal__eyebrow {
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+
+.relationship-modal__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 3px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.relationship-modal__title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationship-modal__event-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--event);
+  box-shadow: 0 0 12px rgba(166, 108, 255, 0.75);
+}
+
+.relationship-modal__record {
+  flex: 0 0 auto;
+  color: var(--selected);
+  font-size: 12px;
+}
+
+.relationship-modal__actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.relationship-modal__actions button {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.relationship-modal__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.relationship-graph {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background:
+    linear-gradient(90deg, rgba(166, 108, 255, 0.04), transparent 28%, rgba(98, 168, 255, 0.04) 50%, transparent 72%, rgba(242, 196, 91, 0.04)),
+    repeating-linear-gradient(90deg, transparent 0, transparent 79px, rgba(38, 50, 66, 0.35) 80px),
+    var(--bg-0);
+}
+
+.relationship-graph__stage {
+  position: relative;
+  min-width: 560px;
+}
+
+.relationship-graph__lane-label {
+  position: absolute;
+  top: 18px;
+  transform: translateX(-50%);
+  z-index: 2;
+  min-width: 160px;
+  padding: 6px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(17, 25, 35, 0.86);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-align: center;
+}
+
+.relationship-graph__lane-label--event { color: #d8c1ff; border-color: rgba(166, 108, 255, 0.4); }
+.relationship-graph__lane-label--function { color: #b9d8ff; border-color: rgba(98, 168, 255, 0.4); }
+.relationship-graph__lane-label--command { color: #ffe3a4; border-color: rgba(242, 196, 91, 0.38); }
+
+.relationship-graph__edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.relationship-edge path {
+  fill: none;
+  stroke: rgba(80, 216, 255, 0.56);
+  stroke-width: 1.5;
+}
+
+.relationship-edge--dashed path {
+  stroke: rgba(154, 167, 184, 0.55);
+  stroke-dasharray: 5 5;
+}
+
+.relationship-edge marker path {
+  fill: var(--selected);
+}
+
+.relationship-edge text {
+  fill: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: var(--bg-0);
+  stroke-width: 5px;
+}
+
+.relationship-node {
+  position: absolute;
+  z-index: 3;
+  width: 230px;
+  height: 56px;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 2px;
+  padding: 7px 9px;
+  text-align: left;
+  border-radius: 7px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+}
+
+.relationship-node:disabled {
+  cursor: default;
+}
+
+.relationship-node:hover:not(:disabled) {
+  border-color: var(--selected);
+  background: var(--panel-bg-elev);
+}
+
+.relationship-node.is-emphasized {
+  box-shadow: 0 0 0 1px var(--selected) inset, 0 0 22px rgba(80, 216, 255, 0.14);
+}
+
+.relationship-node--event {
+  background: rgba(166, 108, 255, 0.1);
+  border-color: rgba(166, 108, 255, 0.48);
+}
+
+.relationship-node--function {
+  background: rgba(98, 168, 255, 0.09);
+  border-color: rgba(98, 168, 255, 0.5);
+}
+
+.relationship-node--command {
+  background: rgba(242, 196, 91, 0.08);
+  border-color: rgba(242, 196, 91, 0.42);
+}
+
+.relationship-node--summary {
+  background: rgba(154, 167, 184, 0.08);
+  border-style: dashed;
+}
+
+.relationship-node.is-missing {
+  background: rgba(154, 167, 184, 0.06);
+  border-style: dashed;
+  opacity: 0.82;
+}
+
+.relationship-node__kind {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+}
+
+.relationship-node__label {
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationship-node--event .relationship-node__label { color: #dac5ff; }
+.relationship-node--function .relationship-node__label { color: var(--function); }
+.relationship-node--command .relationship-node__label { color: #ffe0a0; }
+
+.relationship-node__meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationship-inspector {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px;
+  border-left: 1px solid var(--panel-border);
+  background: var(--bg-1);
+}
+
+.relationship-inspector__title {
+  margin-bottom: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.relationship-inspector__kv {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 7px 10px;
+  font-size: 11px;
+}
+
+.relationship-inspector__kv span {
+  color: var(--text-muted);
+}
+
+.relationship-inspector__kv strong {
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationship-inspector__stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.relationship-inspector__stat {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+}
+
+.relationship-inspector__stat span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.relationship-inspector__stat strong {
+  color: var(--selected);
+  font-size: 14px;
+}
+
+.relationship-inspector__missing {
+  margin: 0 0 16px;
+  padding: 9px 10px;
+  border: 1px dashed rgba(255, 180, 84, 0.45);
+  border-radius: 6px;
+  background: rgba(255, 180, 84, 0.08);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.relationship-inspector__records {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.relationship-inspector__record {
+  padding: 4px 7px;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.relationship-inspector__more {
+  padding: 4px 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+@media (max-width: 1100px) {
+  .relationship-modal {
+    padding: 18px;
+  }
+
+  .relationship-modal__panel {
+    width: calc(100vw - 36px);
+    height: calc(100vh - 36px);
+  }
+
+  .relationship-modal__body {
+    grid-template-columns: 1fr;
+  }
+
+  .relationship-inspector {
+    max-height: 230px;
+    border-left: 0;
+    border-top: 1px solid var(--panel-border);
+  }
+}
+
+@media (max-width: 760px) {
+  .relationship-modal {
+    padding: 10px;
+    align-items: stretch;
+  }
+
+  .relationship-modal__panel {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 20px);
+  }
+
+  .relationship-modal__header {
+    align-items: flex-start;
+    gap: 10px;
+    min-height: 0;
+    padding: 10px;
+  }
+
+  .relationship-modal__title {
+    font-size: 14px;
+  }
+
+  .relationship-modal__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(72px, 1fr)) 34px;
+    gap: 6px;
+    max-width: 214px;
+  }
+
+  .relationship-modal__actions button {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .relationship-modal__close {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    align-self: stretch;
+  }
+
+  .relationship-graph {
+    min-height: 0;
+  }
+
+  .relationship-edge text {
+    font-size: 9px;
+  }
+
+  .relationship-inspector {
+    max-height: 260px;
+    padding: 12px;
+  }
+
+  .relationship-inspector__kv {
+    grid-template-columns: 92px minmax(0, 1fr);
+  }
+}
+
 /* === Status bar === */
 .statusbar {
   display: flex;

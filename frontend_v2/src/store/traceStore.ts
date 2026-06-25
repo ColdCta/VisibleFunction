@@ -70,6 +70,7 @@ type Store = {
   activeRecording: RecordingMetadata | null;
   liveSessionId: number | null;
   highlightIds: Set<number>;
+  relationshipGraphEventId: number | null;
   settings: SettingsState;
   setBaseUrl: (url: string) => void;
   setDensity: (d: SettingsState["displayDensity"]) => void;
@@ -83,6 +84,8 @@ type Store = {
   setBucket: (ticks: number) => void;
   setFilters: (patch: Partial<FilterState>) => void;
   setSelection: (s: Selection) => void;
+  openRelationshipGraph: (eventId: number) => void;
+  closeRelationshipGraph: () => void;
   setRange: (min: number, max: number) => void;
   openLive: () => Promise<void>;
   openRecordings: () => Promise<void>;
@@ -134,6 +137,7 @@ export const useTraceStore = create<Store>((set, get) => ({
   activeRecording: null,
   liveSessionId: null,
   highlightIds: new Set(),
+  relationshipGraphEventId: null,
   settings: { baseUrl: DEFAULT_BASE_URL, displayDensity: "comfortable", liveRetentionTicks: DEFAULT_LIVE_RETENTION_TICKS, liveBufferTicks: DEFAULT_LIVE_BUFFER_TICKS },
 
   setBaseUrl(url) {
@@ -263,6 +267,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       [nodeKey]: empty,
       ...empty,
       pendingRecords: [],
+      relationshipGraphEventId: null,
     });
     pendingIds.clear();
   },
@@ -309,6 +314,14 @@ export const useTraceStore = create<Store>((set, get) => ({
     set({ selection: s, highlightIds: highlight, [nodeKey]: { ...get()[nodeKey], selection: s, highlightIds: highlight } });
   },
 
+  openRelationshipGraph(eventId) {
+    set({ relationshipGraphEventId: eventId });
+  },
+
+  closeRelationshipGraph() {
+    set({ relationshipGraphEventId: null });
+  },
+
   setRange(min, max) {
     const viewRange = { min, max };
     const nodeKey = activeNodeKey(get().mode);
@@ -317,11 +330,11 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   async openLive() {
     if (get().mode !== "live" || get().connection !== "open") {
-      set({ mode: "live", activeRecording: null, ...get().liveNode });
+      set({ mode: "live", activeRecording: null, relationshipGraphEventId: null, ...get().liveNode });
       await get().connect();
       return;
     }
-    set({ mode: "live", activeRecording: null, ...get().liveNode });
+    set({ mode: "live", activeRecording: null, relationshipGraphEventId: null, ...get().liveNode });
   },
 
   async openRecordings() {
@@ -337,6 +350,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       activeRecording: null,
       ...empty,
       pendingRecords: [],
+      relationshipGraphEventId: null,
     });
     pendingIds.clear();
     if (!statusTimer) {
@@ -378,6 +392,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       autoScroll: false,
       paused: false,
       pendingRecords: [],
+      relationshipGraphEventId: null,
     });
     pendingIds.clear();
   },
@@ -628,6 +643,7 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     liveSessionId: sessionId,
     liveNode: empty,
     pendingRecords: [],
+    relationshipGraphEventId: null,
     ...(state.mode === "live" ? empty : {}),
   });
   pendingIds.clear();
