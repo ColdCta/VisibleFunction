@@ -209,6 +209,7 @@ final class VisibleFunctionExportServer {
 				case "/api/v1/records" -> writeJson(socket, recordsResponse(query));
 				case "/api/v1/grouped" -> writeJson(socket, groupedResponse(query));
 				case "/api/v1/tick-filter" -> writeJson(socket, tickFilterResponse(query));
+				case "/api/v1/datapack-analysis" -> writeJson(socket, DatapackAnalysisIndex.json());
 				case "/api/v1/recording/status" -> writeJson(socket, VisibleFunctionRecordingManager.instance().statusJson());
 				case "/api/v1/recordings" -> writeJson(socket, VisibleFunctionRecordingManager.instance().recordingsJson());
 				case "/api/v1/recordings/latest" -> writeJson(socket, VisibleFunctionRecordingManager.instance().latestRecordingJson());

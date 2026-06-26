@@ -211,6 +211,7 @@ final class VisibleFunctionCommands {
 			+ "- records: http://127.0.0.1:" + settings.exportPort() + "/api/v1/records\n"
 			+ "- grouped: http://127.0.0.1:" + settings.exportPort() + "/api/v1/grouped\n"
 			+ "- tick filter: http://127.0.0.1:" + settings.exportPort() + "/api/v1/tick-filter\n"
+			+ "- datapack analysis: http://127.0.0.1:" + settings.exportPort() + "/api/v1/datapack-analysis\n"
 			+ "- stream: http://127.0.0.1:" + settings.exportPort() + "/api/v1/stream\n"
 			+ "- recording status: http://127.0.0.1:" + settings.exportPort() + "/api/v1/recording/status\n"
 			+ "- recordings: http://127.0.0.1:" + settings.exportPort() + "/api/v1/recordings\n"

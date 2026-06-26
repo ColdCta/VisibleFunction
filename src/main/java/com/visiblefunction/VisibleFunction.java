@@ -43,14 +43,19 @@ public class VisibleFunction implements ModInitializer {
 		PayloadTypeRegistry.clientboundPlay().register(VisibleFunctionWindowConfigPayload.TYPE, VisibleFunctionWindowConfigPayload.CODEC);
 		VisibleFunctionCommands.register(settings);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> sendWindowConfig(settings, handler.player));
-		ServerLifecycleEvents.SERVER_STARTED.register(DatapackTickFunctionIndex::rebuild);
+		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			DatapackTickFunctionIndex.rebuild(server);
+			DatapackAnalysisIndex.rebuild(server);
+		});
 		ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
 			if (success) {
 				DatapackTickFunctionIndex.rebuild(server, resourceManager);
+				DatapackAnalysisIndex.rebuild(resourceManager);
 			}
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
 			DatapackTickFunctionIndex.clear();
+			DatapackAnalysisIndex.clear();
 			VisibleFunctionRecordingManager.instance().stopIfActive();
 			VisibleFunctionExportServer.instance().stop();
 		});
