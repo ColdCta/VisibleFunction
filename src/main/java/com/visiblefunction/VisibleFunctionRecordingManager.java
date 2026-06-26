@@ -3,7 +3,9 @@ package com.visiblefunction;
 import com.visiblefunction.VisibleFunctionExportJson.ExportRecord;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.DirectoryStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -18,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 final class VisibleFunctionRecordingManager {
 	private static final DateTimeFormatter FILE_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+	private static final int RECORDING_FLUSH_INTERVAL = 256;
 	private static final VisibleFunctionRecordingManager INSTANCE = new VisibleFunctionRecordingManager();
 
 	private final AtomicLong nextRecordId = new AtomicLong(1);
@@ -41,7 +44,14 @@ final class VisibleFunctionRecordingManager {
 		}
 
 		String id = FILE_TIME_FORMAT.format(LocalDateTime.now());
-		activeSession = new RecordingSession(id, System.currentTimeMillis(), new ArrayList<>());
+		Path tempFile = recordingTempFile(id);
+		try {
+			Files.createDirectories(tempFile.getParent());
+			activeSession = new RecordingSession(id, System.currentTimeMillis(), tempFile, Files.newBufferedWriter(tempFile, StandardCharsets.UTF_8));
+		} catch (IOException exception) {
+			VisibleFunction.LOGGER.error("Failed to start VisibleFunction recording {}", id, exception);
+			return new RecordingResult(false, "VisibleFunction recording failed to start: " + exception.getMessage());
+		}
 		nextRecordId.set(1);
 		return new RecordingResult(true, "VisibleFunction recording started: " + id);
 	}
@@ -55,24 +65,18 @@ final class VisibleFunctionRecordingManager {
 		activeSession = null;
 		long endedAtMillis = System.currentTimeMillis();
 		Path file = recordingFile(session.id());
-		String json = VisibleFunctionExportJson.recording(
-			session.id(),
-			session.startedAtMillis(),
-			endedAtMillis,
-			file.toString(),
-			session.records()
-		);
 
 		try {
-			Files.createDirectories(file.getParent());
-			Files.writeString(file, json, StandardCharsets.UTF_8);
+			session.close();
+			writeRecordingFile(session, endedAtMillis, file);
+			Files.deleteIfExists(session.tempFile());
 		} catch (IOException exception) {
 			VisibleFunction.LOGGER.error("Failed to write VisibleFunction recording {}", session.id(), exception);
 			return new RecordingResult(false, "VisibleFunction recording failed to save: " + exception.getMessage());
 		}
 
-		completedRecordings.add(new CompletedRecording(session.id(), session.startedAtMillis(), endedAtMillis, file, List.copyOf(session.records()), session.records().size()));
-		return new RecordingResult(true, "VisibleFunction recording saved: " + file);
+		completedRecordings.add(new CompletedRecording(session.id(), session.startedAtMillis(), endedAtMillis, file, session.recordCount()));
+		return new RecordingResult(true, "VisibleFunction recording saved: " + absolutePath(file));
 	}
 
 	synchronized RecordingResult toggle() {
@@ -90,12 +94,19 @@ final class VisibleFunctionRecordingManager {
 			return;
 		}
 
-		activeSession.records().add(new ExportRecord(
+		ExportRecord record = new ExportRecord(
 			nextRecordId.getAndIncrement(),
 			payload,
 			System.currentTimeMillis(),
 			VisibleFunctionExportServer.instance().sessionId()
-		));
+		);
+		try {
+			activeSession.append(record);
+		} catch (IOException exception) {
+			VisibleFunction.LOGGER.error("VisibleFunction recording {} stopped after write failure", activeSession.id(), exception);
+			activeSession.closeQuietly();
+			activeSession = null;
+		}
 	}
 
 	synchronized String statusJson() {
@@ -103,7 +114,9 @@ final class VisibleFunctionRecordingManager {
 		Map<String, String> values = new LinkedHashMap<>();
 		values.put("active", Boolean.toString(activeSession != null));
 		values.put("activeId", activeSession == null ? "none" : activeSession.id());
-		values.put("activeRecords", Integer.toString(activeSession == null ? 0 : activeSession.records().size()));
+		values.put("activeRecords", Integer.toString(activeSession == null ? 0 : activeSession.recordCount()));
+		values.put("directory", absolutePath(recordingDir()));
+		values.put("activeFile", activeSession == null ? "none" : absolutePath(activeSession.tempFile()));
 		values.put("completed", Integer.toString(known.size()));
 		values.put("latest", known.isEmpty() ? "none" : known.getLast().id());
 		return VisibleFunctionExportJson.simpleObject(values);
@@ -135,25 +148,24 @@ final class VisibleFunctionRecordingManager {
 	synchronized String recordingJson(String id) {
 		for (CompletedRecording recording : completedRecordings) {
 			if (recording.id().equals(id)) {
-				return VisibleFunctionExportJson.recording(
-					recording.id(),
-					recording.startedAtMillis(),
-					recording.endedAtMillis(),
-					recording.file().toString(),
-					recording.records()
-				);
+				return readRecordingFile(recording.file(), id);
 			}
 		}
 
 		Path file = findRecordingFile(id);
 		if (file != null && Files.isRegularFile(file)) {
-			try {
-				return Files.readString(file, StandardCharsets.UTF_8);
-			} catch (IOException exception) {
-				VisibleFunction.LOGGER.warn("Failed to read VisibleFunction recording {}", id, exception);
-			}
+			return readRecordingFile(file, id);
 		}
 		return "{\"recording\":null}";
+	}
+
+	private static String readRecordingFile(Path file, String id) {
+		try {
+			return Files.readString(file, StandardCharsets.UTF_8);
+		} catch (IOException exception) {
+			VisibleFunction.LOGGER.warn("Failed to read VisibleFunction recording {}", id, exception);
+			return "{\"recording\":null}";
+		}
 	}
 
 	private static void metadataJson(StringBuilder json, CompletedRecording recording) {
@@ -204,11 +216,65 @@ final class VisibleFunctionRecordingManager {
 			long started = longField(json, "startedAtMillis", modified);
 			long ended = longField(json, "endedAtMillis", started);
 			int records = (int) longField(json, "records", 0);
-			return new CompletedRecording(id, started, ended, file, List.of(), records);
+			return new CompletedRecording(id, started, ended, file, records);
 		} catch (IOException exception) {
 			VisibleFunction.LOGGER.warn("Failed to inspect VisibleFunction recording {}", file, exception);
 			return null;
 		}
+	}
+
+	private static void writeRecordingFile(RecordingSession session, long endedAtMillis, Path file) throws IOException {
+		Files.createDirectories(file.getParent());
+		try (OutputStream output = Files.newOutputStream(file)) {
+			writeUtf8(output, recordingHeader(session, endedAtMillis, file));
+			Files.copy(session.tempFile(), output);
+			writeUtf8(output, recordingFooter(session.recordCount()));
+		}
+	}
+
+	private static String recordingHeader(RecordingSession session, long endedAtMillis, Path file) {
+		StringBuilder json = new StringBuilder(256);
+		json.append('{');
+		json.append("\"recording\":{");
+		property(json, "id", session.id()).append(',');
+		property(json, "startedAtMillis", session.startedAtMillis()).append(',');
+		property(json, "endedAtMillis", endedAtMillis).append(',');
+		property(json, "durationMillis", Math.max(0, endedAtMillis - session.startedAtMillis())).append(',');
+		property(json, "file", file.toString()).append(',');
+		property(json, "records", session.recordCount()).append(',');
+		property(json, "format", "records-v1");
+		json.append("},");
+		json.append("\"records\":[");
+		return json.toString();
+	}
+
+	private static String recordingFooter(int records) {
+		return "],\"data\":" + emptyGroupedDataJson(records) + "}";
+	}
+
+	private static String emptyGroupedDataJson(int records) {
+		StringBuilder json = new StringBuilder(192);
+		json.append('{');
+		json.append("\"counts\":{");
+		property(json, "commands", 0).append(',');
+		property(json, "events", 0).append(',');
+		property(json, "functions", 0).append(',');
+		property(json, "other", records);
+		json.append("},");
+		json.append("\"commands\":[],");
+		json.append("\"events\":[],");
+		json.append("\"functions\":[],");
+		json.append("\"other\":[],");
+		json.append("\"commandsByType\":{},");
+		json.append("\"eventsByAction\":{},");
+		json.append("\"functionsById\":{},");
+		json.append("\"tickFilter\":[]");
+		json.append('}');
+		return json.toString();
+	}
+
+	private static void writeUtf8(OutputStream output, String text) throws IOException {
+		output.write(text.getBytes(StandardCharsets.UTF_8));
 	}
 
 	private static Path findRecordingFile(String id) {
@@ -307,16 +373,77 @@ final class VisibleFunctionRecordingManager {
 		return recordingDir().resolve("visiblefunction-recording-" + id + ".json");
 	}
 
+	private static Path recordingTempFile(String id) {
+		return recordingDir().resolve("visiblefunction-recording-" + id + ".records.tmp");
+	}
+
 	private static Path recordingDir() {
 		return Path.of("visiblefunction-recordings");
+	}
+
+	private static String absolutePath(Path path) {
+		return path.toAbsolutePath().normalize().toString();
 	}
 
 	record RecordingResult(boolean success, String message) {
 	}
 
-	private record RecordingSession(String id, long startedAtMillis, List<ExportRecord> records) {
+	private static final class RecordingSession {
+		private final String id;
+		private final long startedAtMillis;
+		private final Path tempFile;
+		private final BufferedWriter writer;
+		private boolean firstRecord = true;
+		private int recordCount;
+
+		private RecordingSession(String id, long startedAtMillis, Path tempFile, BufferedWriter writer) {
+			this.id = id;
+			this.startedAtMillis = startedAtMillis;
+			this.tempFile = tempFile;
+			this.writer = writer;
+		}
+
+		private String id() {
+			return id;
+		}
+
+		private long startedAtMillis() {
+			return startedAtMillis;
+		}
+
+		private Path tempFile() {
+			return tempFile;
+		}
+
+		private int recordCount() {
+			return recordCount;
+		}
+
+		private void append(ExportRecord record) throws IOException {
+			if (!firstRecord) {
+				writer.write(',');
+			}
+			writer.write(VisibleFunctionExportJson.record(record));
+			firstRecord = false;
+			recordCount++;
+			if (recordCount % RECORDING_FLUSH_INTERVAL == 0) {
+				writer.flush();
+			}
+		}
+
+		private void close() throws IOException {
+			writer.flush();
+			writer.close();
+		}
+
+		private void closeQuietly() {
+			try {
+				writer.close();
+			} catch (IOException ignored) {
+			}
+		}
 	}
 
-	private record CompletedRecording(String id, long startedAtMillis, long endedAtMillis, Path file, List<ExportRecord> records, int recordCount) {
+	private record CompletedRecording(String id, long startedAtMillis, long endedAtMillis, Path file, int recordCount) {
 	}
 }

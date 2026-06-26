@@ -90,6 +90,7 @@ type Store = {
   setRange: (min: number, max: number) => void;
   openLive: () => Promise<void>;
   openRecordings: () => Promise<void>;
+  openDatapackGraph: () => void;
   loadRecording: (rec: RecordingMetadata) => Promise<void>;
   loadLatestRecording: () => Promise<void>;
   pollRecordingStatus: () => Promise<void>;
@@ -330,12 +331,13 @@ export const useTraceStore = create<Store>((set, get) => ({
   },
 
   async openLive() {
-    if (get().mode !== "live" || get().connection !== "open") {
-      set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...get().liveNode });
-      await get().connect();
+    const state = get();
+    if (state.connection === "open" || state.connection === "reconnecting") {
+      set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...state.liveNode });
       return;
     }
-    set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...get().liveNode });
+    set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...state.liveNode });
+    await get().connect();
   },
 
   async openRecordings() {
@@ -368,6 +370,20 @@ export const useTraceStore = create<Store>((set, get) => ({
     void get().pollRecordingStatus();
   },
 
+  openDatapackGraph() {
+    const current = get();
+    const patch: Partial<Store> = {
+      mode: "datapack",
+      relationshipGraphRequest: null,
+    };
+    if (current.mode === "live") {
+      patch.liveNode = currentTraceNode(current);
+    } else if (current.mode === "replay") {
+      patch.recordNode = currentTraceNode(current);
+    }
+    set(patch);
+  },
+
   async loadRecording(rec) {
     stopLiveStream();
     let payload;
@@ -377,12 +393,14 @@ export const useTraceStore = create<Store>((set, get) => ({
       return;
     }
     if (!payload.recording) return;
-    const list = dedupeById([
-      ...payload.data.commands,
-      ...payload.data.events,
-      ...payload.data.functions,
-      ...payload.data.other,
-    ]).sort((a, b) => a.id - b.id);
+    const list = dedupeById(
+      payload.records ?? [
+        ...payload.data.commands,
+        ...payload.data.events,
+        ...payload.data.functions,
+        ...payload.data.other,
+      ]
+    ).sort((a, b) => a.id - b.id);
     const range = computeRange(list);
     const node = traceNode(list, range, replayInitialWindow(list, range));
     set({

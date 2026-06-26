@@ -7,6 +7,7 @@ import { DetailPanel } from "./DetailPanel";
 import { StatusBar } from "./StatusBar";
 import { RecordingLibrary } from "./RecordingLibrary";
 import { RelationshipGraphOverlay } from "./RelationshipGraphOverlay";
+import { DatapackGraphView } from "./DatapackGraphView";
 
 // Module-level guard: StrictMode invokes effects twice in dev; this ensures connect() runs once.
 let didBootstrap = false;
@@ -61,10 +62,16 @@ export function AppShell() {
   return (
     <div className="shell">
       <TopBar />
-      <div className="shell__body">
-        <Sidebar />
-        {mode === "recordings" ? <RecordingLibrary /> : <Timeline />}
-        <DetailPanel />
+      <div className={"shell__body" + (mode === "datapack" ? " shell__body--datapack" : "")}>
+        {mode === "datapack" ? (
+          <DatapackGraphView />
+        ) : (
+          <>
+            <Sidebar />
+            {mode === "recordings" ? <RecordingLibrary /> : <Timeline />}
+            <DetailPanel />
+          </>
+        )}
       </div>
       <RelationshipGraphOverlay />
       <StatusBar />

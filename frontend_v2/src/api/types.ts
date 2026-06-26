@@ -49,11 +49,13 @@ export type GroupedResponse = {
 };
 
 export type RecordingStatus = {
-  // All five values are strings because the backend status helper serializes them as strings
+  // These values are strings because the backend status helper serializes them as strings
   // (VisibleFunctionRecordingManager.statusJson). Normalize with normalizeRecordingStatus().
   active: string;
   activeId: string;
   activeRecords: string;
+  directory?: string;
+  activeFile?: string;
   completed: string;
   latest: string;
 };
@@ -62,6 +64,8 @@ export function normalizeRecordingStatus(s: RecordingStatus): {
   active: boolean;
   activeId: string;
   activeRecords: number;
+  directory: string;
+  activeFile: string;
   completed: number;
   latest: string;
 } {
@@ -69,6 +73,8 @@ export function normalizeRecordingStatus(s: RecordingStatus): {
     active: s.active === "true",
     activeId: s.activeId,
     activeRecords: Number(s.activeRecords || 0),
+    directory: s.directory ?? "",
+    activeFile: s.activeFile ?? "none",
     completed: Number(s.completed || 0),
     latest: s.latest,
   };
@@ -81,15 +87,174 @@ export type RecordingMetadata = {
   durationMillis: number;
   file: string;
   records: number;
+  format?: string;
 };
 
 export type RecordingPayload = {
   recording: RecordingMetadata | null;
+  records?: TraceRecord[];
   data: GroupedResponse;
 };
 
 export type RecordingsList = {
   recordings: RecordingMetadata[];
+};
+
+export type DatapackAnalysisResponse = {
+  analysis: {
+    generatedAtMillis: number;
+    functionCount: number;
+    edgeCount: number;
+    variableCount: number;
+    warnings: string[];
+  };
+  functions: AnalyzedFunction[];
+  edges: FunctionEdge[];
+  commands?: DatapackCommand[];
+  variables: DatapackVariable[];
+  graph?: DatapackGraph;
+  tags: Record<string, string[]>;
+};
+
+export type AnalyzedFunction = {
+  id: string;
+  pack: string;
+  lineCount: number;
+  commandCount: number;
+  tickRoot: boolean;
+  tickFunction: boolean;
+  calls: string[];
+  calledBy: string[];
+  variables: string[];
+};
+
+export type FunctionEdge = {
+  id?: string;
+  from: string;
+  to: string;
+  kind: "direct" | "tag" | "scheduled" | string;
+  viaTag: string;
+  line: number;
+  command: string;
+  rawCommand?: string;
+  effectiveCommand?: string;
+  conditionSummary?: string;
+  execute?: ExecuteContext;
+  selectors?: SelectorRef[];
+  variablesRead?: string[];
+  variablesWritten?: string[];
+};
+
+export type DatapackCommand = {
+  id: string;
+  function: string;
+  line: number;
+  rawCommand: string;
+  effectiveCommand: string;
+  rootCommand: string;
+  conditionSummary: string;
+  execute: ExecuteContext;
+  calls: DatapackFunctionCall[];
+  variables: DatapackVariableRef[];
+  variablesRead: string[];
+  variablesWritten: string[];
+  selectors: SelectorRef[];
+};
+
+export type ExecuteContext = {
+  present: boolean;
+  clauses: ExecuteClause[];
+  conditions: ExecuteClause[];
+  stores: ExecuteClause[];
+  contextModifiers: ExecuteClause[];
+  runCommand: string;
+};
+
+export type ExecuteClause = {
+  mode: "if" | "unless" | "store" | "context" | string;
+  keyword: string;
+  raw: string;
+  subject: string;
+  summary: string;
+  variables: string[];
+  selectors: SelectorRef[];
+};
+
+export type SelectorRef = {
+  raw: string;
+  target: string;
+  filters: Record<string, string>;
+};
+
+export type DatapackFunctionCall = {
+  id: string;
+  tag: boolean;
+  kind: string;
+};
+
+export type DatapackVariableRef = {
+  key: string;
+  kind: string;
+  name: string;
+  access: string;
+};
+
+export type DatapackGraph = {
+  nodes: DatapackGraphNode[];
+  edges: DatapackGraphEdge[];
+  modules: DatapackGraphModule[];
+  entrypoints: {
+    tickRoots: string[];
+    loadRoots: string[];
+    noCaller: string[];
+    publicTags: string[];
+  };
+  warnings: string[];
+};
+
+export type DatapackGraphNode = {
+  id: string;
+  module: string;
+  namespace: string;
+  entrypoint: string;
+  tickRoot: boolean;
+  tickFunction: boolean;
+  degree: number;
+  inDegree: number;
+  outDegree: number;
+};
+
+export type DatapackGraphModule = {
+  id: string;
+  namespace: string;
+  functionCount: number;
+  functions: string[];
+};
+
+export type DatapackGraphEdge = {
+  from: string;
+  to: string;
+  kind: string;
+  callCount: number;
+  lines: number[];
+  conditionSummaries: string[];
+  sampleCommands: string[];
+};
+
+export type DatapackVariable = {
+  key: string;
+  kind: "scoreboard" | "score" | "storage" | "tag" | "bossbar" | string;
+  name: string;
+  reads: number;
+  writes: number;
+  occurrences: VariableOccurrence[];
+};
+
+export type VariableOccurrence = {
+  function: string;
+  line: number;
+  access: "read" | "write" | "update" | "query" | "declare" | "remove" | string;
+  command: string;
 };
 
 // Undocumented by the doc but implemented by the backend (VisibleFunctionExportJson.tickFilter).
@@ -112,7 +277,7 @@ export type TickFilterBucketPayload = {
   sampleRecords: TraceRecord[];
 };
 
-export type Mode = "live" | "recordings" | "replay";
+export type Mode = "live" | "recordings" | "replay" | "datapack";
 
 // Built client-side by buildTickFilterBands. Field names keep the `millis` suffix for legacy
 // compatibility but actually hold TICK values (see store/tickFilter.ts toBand), so they compose

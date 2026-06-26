@@ -47,7 +47,9 @@ type DatapackAnalysisResponse = {
   };
   functions: AnalyzedFunction[];
   edges: FunctionEdge[];
+  commands: DatapackCommand[];
   variables: DatapackVariable[];
+  graph: DatapackGraph;
   tags: Record<string, string[]>;
 };
 ```
@@ -84,12 +86,20 @@ Fields:
 
 ```ts
 type FunctionEdge = {
+  id: string;
   from: string;
   to: string;
   kind: "direct" | "tag" | "scheduled" | string;
   viaTag: string;
   line: number;
   command: string;
+  rawCommand: string;
+  effectiveCommand: string;
+  conditionSummary: string;
+  execute: ExecuteContext;
+  selectors: SelectorRef[];
+  variablesRead: string[];
+  variablesWritten: string[];
 };
 ```
 
@@ -102,6 +112,12 @@ Fields:
 - `viaTag`: tag id when `kind === "tag"`, otherwise `"none"`.
 - `line`: source `.mcfunction` line number.
 - `command`: normalized command text.
+- `rawCommand`: original normalized source line before execute unwrapping.
+- `effectiveCommand`: final command after `execute ... run` / `return run` unwrapping.
+- `conditionSummary`: compact execute/context summary for labels/tooltips.
+- `execute`: structured execute clauses.
+- `selectors`: selectors seen on this call line.
+- `variablesRead` / `variablesWritten`: variable keys related to this call line.
 
 Recognized function references:
 
@@ -110,6 +126,113 @@ Recognized function references:
 - `/execute ... run function namespace:path`
 - `/return run function namespace:path`
 - `/schedule function namespace:path ...`
+
+## Command Object
+
+```ts
+type DatapackCommand = {
+  id: string;
+  function: string;
+  line: number;
+  rawCommand: string;
+  effectiveCommand: string;
+  rootCommand: string;
+  conditionSummary: string;
+  execute: ExecuteContext;
+  calls: { id: string; tag: boolean; kind: string }[];
+  variables: { key: string; kind: string; name: string; access: string }[];
+  variablesRead: string[];
+  variablesWritten: string[];
+  selectors: SelectorRef[];
+};
+```
+
+Use `commands[]` when the frontend needs line-level inspection. Use
+`graph.edges[]` for default rendering because it is already aggregated.
+
+## Execute Context
+
+```ts
+type ExecuteContext = {
+  present: boolean;
+  clauses: ExecuteClause[];
+  conditions: ExecuteClause[];
+  stores: ExecuteClause[];
+  contextModifiers: ExecuteClause[];
+  runCommand: string;
+};
+
+type ExecuteClause = {
+  mode: "if" | "unless" | "store" | "context" | string;
+  keyword: string;
+  raw: string;
+  subject: string;
+  summary: string;
+  variables: string[];
+  selectors: SelectorRef[];
+};
+
+type SelectorRef = {
+  raw: string;
+  target: string;
+  filters: Record<string, string>;
+};
+```
+
+Covered execute clauses:
+
+- context modifiers: `as`, `at`, `on`, `in`, `positioned`, `rotated`,
+  `anchored`, `facing`, `align`, `summon`
+- conditions: `if` / `unless` with `entity`, `score`, `data`, `function`,
+  plus other condition forms as raw summaries
+- stores: `store result/success score`, `storage`, and `bossbar`
+
+Selector parsing extracts common filters such as `type`, `tag`, `scores`, `nbt`,
+`distance`, `predicate`, `team`, `limit`, and `sort`. Selector `scores` and
+`tag` filters are also indexed as variable reads.
+
+## Graph Object
+
+```ts
+type DatapackGraph = {
+  nodes: {
+    id: string;
+    module: string;
+    namespace: string;
+    entrypoint: "tickRoot" | "noCaller" | "none" | string;
+    tickRoot: boolean;
+    tickFunction: boolean;
+    degree: number;
+    inDegree: number;
+    outDegree: number;
+  }[];
+  edges: {
+    from: string;
+    to: string;
+    kind: string;
+    callCount: number;
+    lines: number[];
+    conditionSummaries: string[];
+    sampleCommands: string[];
+  }[];
+  modules: {
+    id: string;
+    namespace: string;
+    functionCount: number;
+    functions: string[];
+  }[];
+  entrypoints: {
+    tickRoots: string[];
+    loadRoots: string[];
+    noCaller: string[];
+    publicTags: string[];
+  };
+  warnings: string[];
+};
+```
+
+The frontend should default to `graph.nodes` and `graph.edges` for layout. The
+top-level `edges[]` remains the detailed, per-command edge list.
 
 ## Variable Object
 

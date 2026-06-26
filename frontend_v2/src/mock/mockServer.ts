@@ -1,4 +1,11 @@
-import type { GroupedResponse, HealthResponse, RecordingPayload, RecordingStatus, TraceRecord } from "../api/types";
+import type {
+  DatapackAnalysisResponse,
+  GroupedResponse,
+  HealthResponse,
+  RecordingPayload,
+  RecordingStatus,
+  TraceRecord,
+} from "../api/types";
 import type { VisibleFunctionClient } from "../api/visibleFunctionClient";
 
 // ---------------------------------------------------------------------------
@@ -215,6 +222,9 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
     if (path === "/api/v1/tick-filter") {
       return new Response(JSON.stringify({ tickFilter: [] }), { headers: { "Content-Type": "application/json" } });
     }
+    if (path === "/api/v1/datapack-analysis") {
+      return new Response(JSON.stringify(mockDatapackAnalysis()), { headers: { "Content-Type": "application/json" } });
+    }
     if (path === "/api/v1/recording/status") {
       const body: RecordingStatus = {
         active: "false",
@@ -377,6 +387,171 @@ function generateOne(id: number, ts: number): TraceRecord {
       command_type: "execute",
     },
     detailedFields: { tick: String(tick) },
+  };
+}
+
+function mockDatapackAnalysis(): DatapackAnalysisResponse {
+  const functions = [
+    {
+      id: "wtw:tick",
+      pack: "file/wtw",
+      lineCount: 9,
+      commandCount: 6,
+      tickRoot: true,
+      tickFunction: true,
+      calls: ["wtw:fight_system/on_hit", "wtw:cleanup/temp"],
+      calledBy: [],
+      variables: ["scoreboard:damage", "storage:wtw:temp"],
+    },
+    {
+      id: "wtw:fight_system/on_hit",
+      pack: "file/wtw",
+      lineCount: 24,
+      commandCount: 18,
+      tickRoot: false,
+      tickFunction: true,
+      calls: ["wtw:damage_core", "wtw:display_damage"],
+      calledBy: ["wtw:tick"],
+      variables: ["score:@s:damage", "tag:wtw:damage_calc_done"],
+    },
+    {
+      id: "wtw:damage_core",
+      pack: "file/wtw",
+      lineCount: 18,
+      commandCount: 14,
+      tickRoot: false,
+      tickFunction: true,
+      calls: ["wtw:damage_modifier_notcritical", "wtw:result_writer"],
+      calledBy: ["wtw:fight_system/on_hit"],
+      variables: ["score:@s:damage", "storage:wtw:temp damage.current"],
+    },
+    {
+      id: "wtw:damage_modifier_notcritical",
+      pack: "file/wtw",
+      lineCount: 12,
+      commandCount: 9,
+      tickRoot: false,
+      tickFunction: true,
+      calls: ["wtw:result_writer"],
+      calledBy: ["wtw:damage_core"],
+      variables: ["score:@s:damage"],
+    },
+    {
+      id: "wtw:display_damage",
+      pack: "file/wtw",
+      lineCount: 14,
+      commandCount: 10,
+      tickRoot: false,
+      tickFunction: true,
+      calls: ["wtw:cleanup/temp"],
+      calledBy: ["wtw:fight_system/on_hit"],
+      variables: ["storage:wtw:temp display.value"],
+    },
+    {
+      id: "wtw:result_writer",
+      pack: "file/wtw",
+      lineCount: 11,
+      commandCount: 8,
+      tickRoot: false,
+      tickFunction: true,
+      calls: ["wtw:display_damage"],
+      calledBy: ["wtw:damage_core", "wtw:damage_modifier_notcritical"],
+      variables: ["storage:wtw:temp damage.current"],
+    },
+    {
+      id: "wtw:cleanup/temp",
+      pack: "file/wtw",
+      lineCount: 7,
+      commandCount: 5,
+      tickRoot: false,
+      tickFunction: true,
+      calls: [],
+      calledBy: ["wtw:tick", "wtw:display_damage"],
+      variables: ["storage:wtw:temp", "tag:wtw:damage_calc_done"],
+    },
+    {
+      id: "demo:scheduled_wave",
+      pack: "file/demo",
+      lineCount: 8,
+      commandCount: 6,
+      tickRoot: false,
+      tickFunction: false,
+      calls: ["demo:spawn_wave"],
+      calledBy: [],
+      variables: ["scoreboard:wave"],
+    },
+    {
+      id: "demo:spawn_wave",
+      pack: "file/demo",
+      lineCount: 16,
+      commandCount: 13,
+      tickRoot: false,
+      tickFunction: false,
+      calls: [],
+      calledBy: ["demo:scheduled_wave"],
+      variables: ["score:#wave:wave", "scoreboard:wave"],
+    },
+  ];
+  const edges = [
+    edge("wtw:tick", "wtw:fight_system/on_hit", "direct", 2, "/function wtw:fight_system/on_hit"),
+    edge("wtw:tick", "wtw:cleanup/temp", "direct", 6, "/function wtw:cleanup/temp"),
+    edge("wtw:fight_system/on_hit", "wtw:damage_core", "direct", 4, "/execute as @s run function wtw:damage_core"),
+    edge("wtw:fight_system/on_hit", "wtw:display_damage", "tag", 9, "/function #wtw:damage_display", "wtw:damage_display"),
+    edge("wtw:damage_core", "wtw:damage_modifier_notcritical", "direct", 7, "/return run function wtw:damage_modifier_notcritical"),
+    edge("wtw:damage_core", "wtw:result_writer", "direct", 11, "/function wtw:result_writer"),
+    edge("wtw:damage_modifier_notcritical", "wtw:result_writer", "direct", 8, "/function wtw:result_writer"),
+    edge("wtw:result_writer", "wtw:display_damage", "direct", 6, "/function wtw:display_damage"),
+    edge("wtw:display_damage", "wtw:cleanup/temp", "direct", 10, "/function wtw:cleanup/temp"),
+    edge("demo:scheduled_wave", "demo:spawn_wave", "scheduled", 3, "/schedule function demo:spawn_wave 20t"),
+    edge("demo:scheduled_wave", "#demo:missing_wave", "tag", 7, "/function #demo:missing_wave", "demo:missing_wave"),
+  ];
+  const variables = [
+    variable("scoreboard:damage", "scoreboard", "damage", 3, 2, "wtw:tick"),
+    variable("score:@s:damage", "score", "@s:damage", 4, 7, "wtw:damage_core"),
+    variable("storage:wtw:temp", "storage", "wtw:temp", 2, 3, "wtw:cleanup/temp"),
+    variable("storage:wtw:temp damage.current", "storage", "wtw:temp damage.current", 1, 4, "wtw:result_writer"),
+    variable("storage:wtw:temp display.value", "storage", "wtw:temp display.value", 1, 2, "wtw:display_damage"),
+    variable("tag:wtw:damage_calc_done", "tag", "wtw:damage_calc_done", 2, 2, "wtw:fight_system/on_hit"),
+    variable("scoreboard:wave", "scoreboard", "wave", 1, 1, "demo:scheduled_wave"),
+    variable("score:#wave:wave", "score", "#wave:wave", 1, 1, "demo:spawn_wave"),
+  ];
+  return {
+    analysis: {
+      generatedAtMillis: Date.now(),
+      functionCount: functions.length,
+      edgeCount: edges.length,
+      variableCount: variables.length,
+      warnings: ["Function demo:scheduled_wave references empty or missing tag #demo:missing_wave at line 7"],
+    },
+    functions,
+    edges,
+    variables,
+    tags: {
+      "minecraft:tick": ["wtw:tick"],
+      "wtw:damage_display": ["wtw:display_damage"],
+    },
+  };
+}
+
+function edge(from: string, to: string, kind: string, line: number, command: string, viaTag = "none") {
+  return { from, to, kind, viaTag, line, command };
+}
+
+function variable(key: string, kind: string, name: string, reads: number, writes: number, fn: string) {
+  return {
+    key,
+    kind,
+    name,
+    reads,
+    writes,
+    occurrences: [
+      {
+        function: fn,
+        line: 1,
+        access: reads > writes ? "read" : "update",
+        command: `/execute if score @s ${name.split(":").pop() ?? name} matches 1.. run say sample`,
+      },
+    ],
   };
 }
 

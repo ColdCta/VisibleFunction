@@ -25,6 +25,8 @@ public final class VisibleFunctionHud {
 	private static final int HIGH_FREQUENCY_WINDOW_TICKS = 20;
 	private static final int HIGH_FREQUENCY_THRESHOLD = 8;
 	private static final int MAX_SAMPLE_RECORDS = 6;
+	private static final int MAX_CLIENT_RECORDS = 20000;
+	private static final int CLIENT_RECORD_PRUNE_BATCH = 1000;
 	private static final List<EventRecord> RECORDS = new ArrayList<>();
 	private static final TraceStore TRACE_STORE = new TraceStore();
 	private static final Map<String, TickFilterBucket> TICK_FILTER_BUCKETS = new LinkedHashMap<>();
@@ -49,6 +51,22 @@ public final class VisibleFunctionHud {
 		TRACE_STORE.add(record);
 		if (updateTickFilter(record)) {
 			HISTORY_FILTERED_RECORDS.add(record);
+		}
+		pruneRetainedRecords();
+	}
+
+	private static void pruneRetainedRecords() {
+		int overflow = RECORDS.size() - MAX_CLIENT_RECORDS;
+		if (overflow <= CLIENT_RECORD_PRUNE_BATCH) {
+			return;
+		}
+
+		List<EventRecord> removed = new ArrayList<>(RECORDS.subList(0, overflow));
+		RECORDS.subList(0, overflow).clear();
+		for (EventRecord record : removed) {
+			TRACE_STORE.remove(record);
+			OLDER_HISTORY_RECORDS.remove(record);
+			HISTORY_FILTERED_RECORDS.remove(record);
 		}
 	}
 
@@ -582,13 +600,24 @@ public final class VisibleFunctionHud {
 				if (record.isCommand()) {
 					commandsByCommandId.remove(commandId);
 				} else {
-					removeFromList(eventsByCommandId.get(commandId), record);
+					removeFromList(eventsByCommandId, commandId, record);
 				}
 			}
 
 			Long functionCallId = functionCallIdsByRecord.remove(record);
 			if (functionCallId != null) {
-				removeFromList(recordsByFunctionCallId.get(functionCallId), record);
+				removeFromList(recordsByFunctionCallId, functionCallId, record);
+				List<EventRecord> records = recordsByFunctionCallId.get(functionCallId);
+				if (records == null || records.isEmpty()) {
+					String functionId = record.commandContext().function();
+					List<Long> calls = functionCallsByFunctionId.get(functionId);
+					if (calls != null) {
+						calls.remove(functionCallId);
+						if (calls.isEmpty()) {
+							functionCallsByFunctionId.remove(functionId);
+						}
+					}
+				}
 			}
 		}
 
@@ -677,9 +706,13 @@ public final class VisibleFunctionHud {
 			return lastFunctionCallId;
 		}
 
-		private static void removeFromList(List<EventRecord> records, EventRecord record) {
+		private static <K> void removeFromList(Map<K, List<EventRecord>> index, K key, EventRecord record) {
+			List<EventRecord> records = index.get(key);
 			if (records != null) {
 				records.remove(record);
+				if (records.isEmpty()) {
+					index.remove(key);
+				}
 			}
 		}
 	}

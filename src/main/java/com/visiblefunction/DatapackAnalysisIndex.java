@@ -70,9 +70,10 @@ final class DatapackAnalysisIndex {
 		Map<String, FunctionBuilder> functions = loadFunctions(resourceManager, warnings);
 		Map<String, VariableBuilder> variables = new LinkedHashMap<>();
 		List<EdgeInfo> edges = new ArrayList<>();
+		List<DatapackCommandAnalyzer.CommandAnalysis> commands = new ArrayList<>();
 
 		for (FunctionBuilder function : functions.values()) {
-			parseFunction(function, tags, functions, variables, edges, warnings);
+			parseFunction(function, tags, functions, variables, edges, commands, warnings);
 		}
 
 		for (EdgeInfo edge : edges) {
@@ -107,8 +108,9 @@ final class DatapackAnalysisIndex {
 		tags.entrySet().stream()
 			.sorted(Map.Entry.comparingByKey())
 			.forEach(entry -> sortedTags.put(entry.getKey(), entry.getValue().stream().sorted().toList()));
+		GraphInfo graph = buildGraph(functionInfos, edgeInfos, sortedTags, warnings);
 
-		return new AnalysisSnapshot(System.currentTimeMillis(), functionInfos, edgeInfos, variableInfos, sortedTags, List.copyOf(warnings));
+		return new AnalysisSnapshot(System.currentTimeMillis(), functionInfos, edgeInfos, commands, variableInfos, sortedTags, graph, List.copyOf(warnings));
 	}
 
 	private static Map<String, FunctionBuilder> loadFunctions(ResourceManager resourceManager, List<String> warnings) {
@@ -332,6 +334,7 @@ final class DatapackAnalysisIndex {
 		Map<String, FunctionBuilder> functions,
 		Map<String, VariableBuilder> variables,
 		List<EdgeInfo> edges,
+		List<DatapackCommandAnalyzer.CommandAnalysis> commands,
 		List<String> warnings
 	) {
 		for (FunctionCommand command : function.commands) {
@@ -341,25 +344,31 @@ final class DatapackAnalysisIndex {
 
 			String normalized = CommandText.normalize(command.command());
 			function.currentLine = command.line();
-			for (FunctionCall call : functionCalls(normalized, warnings, function.id, command.line())) {
+			DatapackCommandAnalyzer.CommandAnalysis analysis = DatapackCommandAnalyzer.analyze(function.id, command.line(), command.command(), warnings);
+			commands.add(analysis);
+			for (DatapackCommandAnalyzer.VariableRef variable : analysis.variables()) {
+				addVariableOccurrence(function, variables, variable, command.line(), analysis.rawCommand());
+			}
+
+			int ordinal = 0;
+			for (DatapackCommandAnalyzer.FunctionCall call : analysis.calls()) {
 				if (call.tag()) {
 					List<String> tagFunctions = tags.get(call.id());
 					if (tagFunctions == null || tagFunctions.isEmpty()) {
-						edges.add(new EdgeInfo(function.id, "#" + call.id(), "tag", call.id(), command.line(), normalized));
+						String target = "#" + call.id();
+						edges.add(edgeInfo(function.id, target, "tag", call.id(), command.line(), ordinal++, analysis));
 						warnings.add("Function " + function.id + " references empty or missing tag #" + call.id() + " at line " + command.line());
 						continue;
 					}
 
 					for (String target : tagFunctions) {
-						edges.add(new EdgeInfo(function.id, target, "tag", call.id(), command.line(), normalized));
+						edges.add(edgeInfo(function.id, target, "tag", call.id(), command.line(), ordinal++, analysis));
 					}
 					continue;
 				}
 
-				edges.add(new EdgeInfo(function.id, call.id(), call.kind(), "none", command.line(), normalized));
+				edges.add(edgeInfo(function.id, call.id(), call.kind(), "none", command.line(), ordinal++, analysis));
 			}
-
-			parseVariables(normalized, function, variables);
 		}
 
 		for (String variable : function.variables) {
@@ -367,6 +376,211 @@ final class DatapackAnalysisIndex {
 				warnings.add("Function " + function.id + " referenced variable " + variable + " but no variable entry was built.");
 			}
 		}
+	}
+
+	private static EdgeInfo edgeInfo(
+		String from,
+		String to,
+		String kind,
+		String viaTag,
+		int line,
+		int ordinal,
+		DatapackCommandAnalyzer.CommandAnalysis analysis
+	) {
+		return new EdgeInfo(
+			edgeId(from, line, ordinal, to),
+			from,
+			to,
+			kind,
+			viaTag,
+			line,
+			analysis.rawCommand(),
+			analysis.rawCommand(),
+			analysis.effectiveCommand(),
+			analysis.conditionSummary(),
+			analysis.execute(),
+			analysis.selectors(),
+			analysis.variablesRead(),
+			analysis.variablesWritten()
+		);
+	}
+
+	private static String edgeId(String from, int line, int ordinal, String to) {
+		return from + ":" + line + ":" + ordinal + ":" + to;
+	}
+
+	private static void addVariableOccurrence(
+		FunctionBuilder function,
+		Map<String, VariableBuilder> variables,
+		DatapackCommandAnalyzer.VariableRef variable,
+		int line,
+		String command
+	) {
+		function.variables.add(variable.key());
+		VariableBuilder builder = variables.computeIfAbsent(
+			variable.key(),
+			ignored -> new VariableBuilder(variable.key(), variable.kind(), variable.name())
+		);
+		builder.add(new VariableOccurrence(function.id, line, variable.access(), command));
+	}
+
+	private static GraphInfo buildGraph(
+		List<FunctionInfo> functions,
+		List<EdgeInfo> edges,
+		Map<String, List<String>> tags,
+		List<String> warnings
+	) {
+		Map<String, FunctionInfo> byId = new LinkedHashMap<>();
+		for (FunctionInfo function : functions) {
+			byId.put(function.id(), function);
+		}
+
+		Map<String, Degree> degrees = new LinkedHashMap<>();
+		for (FunctionInfo function : functions) {
+			degrees.put(function.id(), new Degree());
+		}
+
+		Map<String, GraphEdgeBuilder> edgeGroups = new LinkedHashMap<>();
+		for (EdgeInfo edge : edges) {
+			Degree source = degrees.computeIfAbsent(edge.from(), ignored -> new Degree());
+			source.out++;
+			Degree target = degrees.computeIfAbsent(edge.to(), ignored -> new Degree());
+			target.in++;
+			String key = edge.from() + "|" + edge.to() + "|" + edge.kind();
+			edgeGroups.computeIfAbsent(key, ignored -> new GraphEdgeBuilder(edge.from(), edge.to(), edge.kind())).add(edge);
+		}
+
+		List<GraphNode> nodes = functions.stream()
+			.map(function -> {
+				Degree degree = degrees.getOrDefault(function.id(), new Degree());
+				return new GraphNode(
+					function.id(),
+					module(function.id()),
+					namespace(function.id()),
+					entrypoint(function, degree),
+					function.tickRoot(),
+					function.tickFunction(),
+					degree.in + degree.out,
+					degree.in,
+					degree.out
+				);
+			})
+			.sorted(Comparator.comparing(GraphNode::id))
+			.toList();
+
+		List<GraphEdge> graphEdges = edgeGroups.values().stream()
+			.map(GraphEdgeBuilder::toInfo)
+			.sorted(Comparator
+				.comparing(GraphEdge::from)
+				.thenComparing(GraphEdge::to)
+				.thenComparing(GraphEdge::kind))
+			.toList();
+
+		Map<String, GraphModuleBuilder> moduleBuilders = new LinkedHashMap<>();
+		for (GraphNode node : nodes) {
+			moduleBuilders.computeIfAbsent(node.module(), GraphModuleBuilder::new).add(node);
+		}
+		List<GraphModule> modules = moduleBuilders.values().stream()
+			.map(GraphModuleBuilder::toInfo)
+			.sorted(Comparator.comparing(GraphModule::id))
+			.toList();
+
+		List<String> tickRoots = functions.stream().filter(FunctionInfo::tickRoot).map(FunctionInfo::id).sorted().toList();
+		List<String> loadRoots = tags.getOrDefault("minecraft:load", List.of()).stream().sorted().toList();
+		List<String> noCaller = functions.stream()
+			.filter(function -> function.calledBy().isEmpty())
+			.map(FunctionInfo::id)
+			.sorted()
+			.toList();
+		List<String> publicTags = tags.keySet().stream()
+			.filter(tag -> !tag.startsWith("minecraft:"))
+			.sorted()
+			.toList();
+		List<String> graphWarnings = new ArrayList<>();
+		for (EdgeInfo edge : edges) {
+			if (isConcreteFunction(edge.to()) && !byId.containsKey(edge.to())) {
+				graphWarnings.add("Missing target " + edge.to() + " referenced by " + edge.from());
+			}
+		}
+		graphWarnings.addAll(cycleWarnings(functions, edges));
+		warnings.addAll(graphWarnings);
+
+		return new GraphInfo(nodes, graphEdges, modules, new Entrypoints(tickRoots, loadRoots, noCaller, publicTags), List.copyOf(graphWarnings));
+	}
+
+	private static List<String> cycleWarnings(List<FunctionInfo> functions, List<EdgeInfo> edges) {
+		Map<String, List<String>> adjacency = new LinkedHashMap<>();
+		for (FunctionInfo function : functions) {
+			adjacency.put(function.id(), new ArrayList<>());
+		}
+		for (EdgeInfo edge : edges) {
+			if (adjacency.containsKey(edge.from()) && adjacency.containsKey(edge.to())) {
+				adjacency.get(edge.from()).add(edge.to());
+			}
+		}
+
+		List<String> warnings = new ArrayList<>();
+		Set<String> visiting = new LinkedHashSet<>();
+		Set<String> visited = new LinkedHashSet<>();
+		for (String function : adjacency.keySet()) {
+			detectCycle(function, adjacency, visiting, visited, warnings);
+			if (warnings.size() >= 8) {
+				break;
+			}
+		}
+		return warnings;
+	}
+
+	private static void detectCycle(
+		String function,
+		Map<String, List<String>> adjacency,
+		Set<String> visiting,
+		Set<String> visited,
+		List<String> warnings
+	) {
+		if (visited.contains(function) || warnings.size() >= 8) {
+			return;
+		}
+		if (visiting.contains(function)) {
+			warnings.add("Cycle detected involving " + function);
+			return;
+		}
+		visiting.add(function);
+		for (String next : adjacency.getOrDefault(function, List.of())) {
+			detectCycle(next, adjacency, visiting, visited, warnings);
+		}
+		visiting.remove(function);
+		visited.add(function);
+	}
+
+	private static String module(String functionId) {
+		Identifier id = Identifier.tryParse(functionId);
+		if (id == null) {
+			return "unknown";
+		}
+		String[] parts = id.getPath().split("/");
+		if (parts.length == 0) {
+			return id.getNamespace();
+		}
+		if (parts.length == 1) {
+			return id.getNamespace() + ":" + parts[0];
+		}
+		return id.getNamespace() + ":" + parts[0] + "/" + parts[1];
+	}
+
+	private static String namespace(String functionId) {
+		Identifier id = Identifier.tryParse(functionId);
+		return id == null ? "unknown" : id.getNamespace();
+	}
+
+	private static String entrypoint(FunctionInfo function, Degree degree) {
+		if (function.tickRoot()) {
+			return "tickRoot";
+		}
+		if (degree.in == 0) {
+			return "noCaller";
+		}
+		return "none";
 	}
 
 	private static List<FunctionCall> functionCalls(String command, List<String> warnings, String functionId, int line) {
@@ -802,8 +1016,12 @@ final class DatapackAnalysisIndex {
 		functionArray(json, snapshot.functions()).append(',');
 		json.append("\"edges\":");
 		edgeArray(json, snapshot.edges()).append(',');
+		json.append("\"commands\":");
+		commandArray(json, snapshot.commands()).append(',');
 		json.append("\"variables\":");
 		variableArray(json, snapshot.variables()).append(',');
+		json.append("\"graph\":");
+		graphObject(json, snapshot.graph()).append(',');
 		json.append("\"tags\":");
 		tagsObject(json, snapshot.tags());
 		json.append('}');
@@ -846,13 +1064,146 @@ final class DatapackAnalysisIndex {
 			json.append('{');
 			property(json, "from", edge.from()).append(',');
 			property(json, "to", edge.to()).append(',');
+			property(json, "id", edge.id()).append(',');
 			property(json, "kind", edge.kind()).append(',');
 			property(json, "viaTag", edge.viaTag()).append(',');
 			property(json, "line", edge.line()).append(',');
-			property(json, "command", edge.command());
+			property(json, "command", edge.command()).append(',');
+			property(json, "rawCommand", edge.rawCommand()).append(',');
+			property(json, "effectiveCommand", edge.effectiveCommand()).append(',');
+			property(json, "conditionSummary", edge.conditionSummary()).append(',');
+			json.append("\"execute\":");
+			executeObject(json, edge.execute()).append(',');
+			json.append("\"selectors\":");
+			selectorArray(json, edge.selectors()).append(',');
+			json.append("\"variablesRead\":");
+			stringArray(json, edge.variablesRead()).append(',');
+			json.append("\"variablesWritten\":");
+			stringArray(json, edge.variablesWritten());
 			json.append('}');
 		}
 		json.append(']');
+		return json;
+	}
+
+	private static StringBuilder commandArray(StringBuilder json, List<DatapackCommandAnalyzer.CommandAnalysis> commands) {
+		json.append('[');
+		for (int index = 0; index < commands.size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			commandObject(json, commands.get(index));
+		}
+		json.append(']');
+		return json;
+	}
+
+	private static StringBuilder commandObject(StringBuilder json, DatapackCommandAnalyzer.CommandAnalysis command) {
+		json.append('{');
+		property(json, "id", command.id()).append(',');
+		property(json, "function", command.function()).append(',');
+		property(json, "line", command.line()).append(',');
+		property(json, "rawCommand", command.rawCommand()).append(',');
+		property(json, "effectiveCommand", command.effectiveCommand()).append(',');
+		property(json, "rootCommand", command.rootCommand()).append(',');
+		property(json, "conditionSummary", command.conditionSummary()).append(',');
+		json.append("\"execute\":");
+		executeObject(json, command.execute()).append(',');
+		json.append("\"calls\":[");
+		for (int index = 0; index < command.calls().size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			DatapackCommandAnalyzer.FunctionCall call = command.calls().get(index);
+			json.append('{');
+			property(json, "id", call.id()).append(',');
+			property(json, "tag", call.tag()).append(',');
+			property(json, "kind", call.kind());
+			json.append('}');
+		}
+		json.append("],");
+		json.append("\"variables\":[");
+		for (int index = 0; index < command.variables().size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			variableRefObject(json, command.variables().get(index));
+		}
+		json.append("],");
+		json.append("\"variablesRead\":");
+		stringArray(json, command.variablesRead()).append(',');
+		json.append("\"variablesWritten\":");
+		stringArray(json, command.variablesWritten()).append(',');
+		json.append("\"selectors\":");
+		selectorArray(json, command.selectors());
+		json.append('}');
+		return json;
+	}
+
+	private static StringBuilder executeObject(StringBuilder json, DatapackCommandAnalyzer.ExecuteContext execute) {
+		json.append('{');
+		property(json, "present", execute.present()).append(',');
+		json.append("\"clauses\":");
+		clauseArray(json, execute.clauses()).append(',');
+		json.append("\"conditions\":");
+		clauseArray(json, execute.conditions()).append(',');
+		json.append("\"stores\":");
+		clauseArray(json, execute.stores()).append(',');
+		json.append("\"contextModifiers\":");
+		clauseArray(json, execute.contextModifiers()).append(',');
+		property(json, "runCommand", execute.runCommand());
+		json.append('}');
+		return json;
+	}
+
+	private static StringBuilder clauseArray(StringBuilder json, List<DatapackCommandAnalyzer.ExecuteClause> clauses) {
+		json.append('[');
+		for (int index = 0; index < clauses.size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			DatapackCommandAnalyzer.ExecuteClause clause = clauses.get(index);
+			json.append('{');
+			property(json, "mode", clause.mode()).append(',');
+			property(json, "keyword", clause.keyword()).append(',');
+			property(json, "raw", clause.raw()).append(',');
+			property(json, "subject", clause.subject()).append(',');
+			property(json, "summary", clause.summary()).append(',');
+			json.append("\"variables\":");
+			stringArray(json, clause.variables()).append(',');
+			json.append("\"selectors\":");
+			selectorArray(json, clause.selectors());
+			json.append('}');
+		}
+		json.append(']');
+		return json;
+	}
+
+	private static StringBuilder selectorArray(StringBuilder json, List<DatapackCommandAnalyzer.SelectorRef> selectors) {
+		json.append('[');
+		for (int index = 0; index < selectors.size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			DatapackCommandAnalyzer.SelectorRef selector = selectors.get(index);
+			json.append('{');
+			property(json, "raw", selector.raw()).append(',');
+			property(json, "target", selector.target()).append(',');
+			json.append("\"filters\":");
+			stringMap(json, selector.filters());
+			json.append('}');
+		}
+		json.append(']');
+		return json;
+	}
+
+	private static StringBuilder variableRefObject(StringBuilder json, DatapackCommandAnalyzer.VariableRef variable) {
+		json.append('{');
+		property(json, "key", variable.key()).append(',');
+		property(json, "kind", variable.kind()).append(',');
+		property(json, "name", variable.name()).append(',');
+		property(json, "access", variable.access());
+		json.append('}');
 		return json;
 	}
 
@@ -888,6 +1239,84 @@ final class DatapackAnalysisIndex {
 		return json;
 	}
 
+	private static StringBuilder graphObject(StringBuilder json, GraphInfo graph) {
+		json.append('{');
+		json.append("\"nodes\":[");
+		for (int index = 0; index < graph.nodes().size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			GraphNode node = graph.nodes().get(index);
+			json.append('{');
+			property(json, "id", node.id()).append(',');
+			property(json, "module", node.module()).append(',');
+			property(json, "namespace", node.namespace()).append(',');
+			property(json, "entrypoint", node.entrypoint()).append(',');
+			property(json, "tickRoot", node.tickRoot()).append(',');
+			property(json, "tickFunction", node.tickFunction()).append(',');
+			property(json, "degree", node.degree()).append(',');
+			property(json, "inDegree", node.inDegree()).append(',');
+			property(json, "outDegree", node.outDegree());
+			json.append('}');
+		}
+		json.append("],");
+		json.append("\"edges\":[");
+		for (int index = 0; index < graph.edges().size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			GraphEdge edge = graph.edges().get(index);
+			json.append('{');
+			property(json, "from", edge.from()).append(',');
+			property(json, "to", edge.to()).append(',');
+			property(json, "kind", edge.kind()).append(',');
+			property(json, "callCount", edge.callCount()).append(',');
+			json.append("\"lines\":");
+			intArray(json, edge.lines()).append(',');
+			json.append("\"conditionSummaries\":");
+			stringArray(json, edge.conditionSummaries()).append(',');
+			json.append("\"sampleCommands\":");
+			stringArray(json, edge.sampleCommands());
+			json.append('}');
+		}
+		json.append("],");
+		json.append("\"modules\":[");
+		for (int index = 0; index < graph.modules().size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			GraphModule module = graph.modules().get(index);
+			json.append('{');
+			property(json, "id", module.id()).append(',');
+			property(json, "namespace", module.namespace()).append(',');
+			property(json, "functionCount", module.functionCount()).append(',');
+			json.append("\"functions\":");
+			stringArray(json, module.functions());
+			json.append('}');
+		}
+		json.append("],");
+		json.append("\"entrypoints\":");
+		entrypointsObject(json, graph.entrypoints()).append(',');
+		json.append("\"warnings\":");
+		stringArray(json, graph.warnings());
+		json.append('}');
+		return json;
+	}
+
+	private static StringBuilder entrypointsObject(StringBuilder json, Entrypoints entrypoints) {
+		json.append('{');
+		json.append("\"tickRoots\":");
+		stringArray(json, entrypoints.tickRoots()).append(',');
+		json.append("\"loadRoots\":");
+		stringArray(json, entrypoints.loadRoots()).append(',');
+		json.append("\"noCaller\":");
+		stringArray(json, entrypoints.noCaller()).append(',');
+		json.append("\"publicTags\":");
+		stringArray(json, entrypoints.publicTags());
+		json.append('}');
+		return json;
+	}
+
 	private static StringBuilder tagsObject(StringBuilder json, Map<String, List<String>> tags) {
 		json.append('{');
 		int index = 0;
@@ -912,6 +1341,32 @@ final class DatapackAnalysisIndex {
 			quoted(json, value);
 		}
 		json.append(']');
+		return json;
+	}
+
+	private static StringBuilder intArray(StringBuilder json, List<Integer> values) {
+		json.append('[');
+		for (int index = 0; index < values.size(); index++) {
+			if (index > 0) {
+				json.append(',');
+			}
+			json.append(values.get(index));
+		}
+		json.append(']');
+		return json;
+	}
+
+	private static StringBuilder stringMap(StringBuilder json, Map<String, String> values) {
+		json.append('{');
+		int index = 0;
+		for (Map.Entry<String, String> entry : values.entrySet()) {
+			if (index++ > 0) {
+				json.append(',');
+			}
+			quoted(json, entry.getKey()).append(':');
+			quoted(json, entry.getValue());
+		}
+		json.append('}');
 		return json;
 	}
 
@@ -970,7 +1425,22 @@ final class DatapackAnalysisIndex {
 	private record FunctionCall(String id, boolean tag, String kind) {
 	}
 
-	private record EdgeInfo(String from, String to, String kind, String viaTag, int line, String command) {
+	private record EdgeInfo(
+		String id,
+		String from,
+		String to,
+		String kind,
+		String viaTag,
+		int line,
+		String command,
+		String rawCommand,
+		String effectiveCommand,
+		String conditionSummary,
+		DatapackCommandAnalyzer.ExecuteContext execute,
+		List<DatapackCommandAnalyzer.SelectorRef> selectors,
+		List<String> variablesRead,
+		List<String> variablesWritten
+	) {
 	}
 
 	private record VariableOccurrence(String function, int line, String access, String command) {
@@ -997,6 +1467,101 @@ final class DatapackAnalysisIndex {
 		int writes,
 		List<VariableOccurrence> occurrences
 	) {
+	}
+
+	private record GraphInfo(
+		List<GraphNode> nodes,
+		List<GraphEdge> edges,
+		List<GraphModule> modules,
+		Entrypoints entrypoints,
+		List<String> warnings
+	) {
+		private static GraphInfo empty() {
+			return new GraphInfo(List.of(), List.of(), List.of(), new Entrypoints(List.of(), List.of(), List.of(), List.of()), List.of());
+		}
+	}
+
+	private record GraphNode(
+		String id,
+		String module,
+		String namespace,
+		String entrypoint,
+		boolean tickRoot,
+		boolean tickFunction,
+		int degree,
+		int inDegree,
+		int outDegree
+	) {
+	}
+
+	private record GraphEdge(
+		String from,
+		String to,
+		String kind,
+		int callCount,
+		List<Integer> lines,
+		List<String> conditionSummaries,
+		List<String> sampleCommands
+	) {
+	}
+
+	private record GraphModule(String id, String namespace, int functionCount, List<String> functions) {
+	}
+
+	private record Entrypoints(List<String> tickRoots, List<String> loadRoots, List<String> noCaller, List<String> publicTags) {
+	}
+
+	private static final class GraphEdgeBuilder {
+		private final String from;
+		private final String to;
+		private final String kind;
+		private final LinkedHashSet<Integer> lines = new LinkedHashSet<>();
+		private final LinkedHashSet<String> conditionSummaries = new LinkedHashSet<>();
+		private final List<String> sampleCommands = new ArrayList<>();
+		private int callCount;
+
+		private GraphEdgeBuilder(String from, String to, String kind) {
+			this.from = from;
+			this.to = to;
+			this.kind = kind;
+		}
+
+		private void add(EdgeInfo edge) {
+			callCount++;
+			lines.add(edge.line());
+			if (!edge.conditionSummary().isBlank() && !"none".equals(edge.conditionSummary())) {
+				conditionSummaries.add(edge.conditionSummary());
+			}
+			if (sampleCommands.size() < 3) {
+				sampleCommands.add(edge.command());
+			}
+		}
+
+		private GraphEdge toInfo() {
+			return new GraphEdge(from, to, kind, callCount, List.copyOf(lines), List.copyOf(conditionSummaries), List.copyOf(sampleCommands));
+		}
+	}
+
+	private static final class GraphModuleBuilder {
+		private final String id;
+		private final LinkedHashSet<String> functions = new LinkedHashSet<>();
+
+		private GraphModuleBuilder(String id) {
+			this.id = id;
+		}
+
+		private void add(GraphNode node) {
+			functions.add(node.id());
+		}
+
+		private GraphModule toInfo() {
+			return new GraphModule(id, namespace(id), functions.size(), functions.stream().sorted().toList());
+		}
+	}
+
+	private static final class Degree {
+		private int in;
+		private int out;
 	}
 
 	private static final class FunctionBuilder {
@@ -1073,8 +1638,10 @@ final class DatapackAnalysisIndex {
 		private final long generatedAtMillis;
 		private final List<FunctionInfo> functions;
 		private final List<EdgeInfo> edges;
+		private final List<DatapackCommandAnalyzer.CommandAnalysis> commands;
 		private final List<VariableInfo> variables;
 		private final Map<String, List<String>> tags;
+		private final GraphInfo graph;
 		private final List<String> warnings;
 		private volatile String json;
 
@@ -1082,20 +1649,24 @@ final class DatapackAnalysisIndex {
 			long generatedAtMillis,
 			List<FunctionInfo> functions,
 			List<EdgeInfo> edges,
+			List<DatapackCommandAnalyzer.CommandAnalysis> commands,
 			List<VariableInfo> variables,
 			Map<String, List<String>> tags,
+			GraphInfo graph,
 			List<String> warnings
 		) {
 			this.generatedAtMillis = generatedAtMillis;
 			this.functions = functions;
 			this.edges = edges;
+			this.commands = commands;
 			this.variables = variables;
 			this.tags = tags;
+			this.graph = graph;
 			this.warnings = warnings;
 		}
 
 		private static AnalysisSnapshot empty() {
-			return new AnalysisSnapshot(0, List.of(), List.of(), List.of(), Map.of(), List.of());
+			return new AnalysisSnapshot(0, List.of(), List.of(), List.of(), List.of(), Map.of(), GraphInfo.empty(), List.of());
 		}
 
 		private long generatedAtMillis() {
@@ -1110,12 +1681,20 @@ final class DatapackAnalysisIndex {
 			return edges;
 		}
 
+		private List<DatapackCommandAnalyzer.CommandAnalysis> commands() {
+			return commands;
+		}
+
 		private List<VariableInfo> variables() {
 			return variables;
 		}
 
 		private Map<String, List<String>> tags() {
 			return tags;
+		}
+
+		private GraphInfo graph() {
+			return graph;
 		}
 
 		private List<String> warnings() {

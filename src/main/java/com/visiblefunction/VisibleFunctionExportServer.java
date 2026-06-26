@@ -18,22 +18,25 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.atomic.AtomicLong;
 
 final class VisibleFunctionExportServer {
 	private static final int DEFAULT_LIMIT = 500;
 	private static final int MAX_LIMIT = 5000;
 	private static final int MAX_STREAM_BATCH = 512;
+	private static final int MAX_RETAINED_RECORDS = 20000;
+	private static final int RETAINED_RECORD_PRUNE_BATCH = 1000;
+	private static final int MAX_PENDING_STREAM_RECORDS = 8192;
 	private static final VisibleFunctionExportServer INSTANCE = new VisibleFunctionExportServer();
 
 	private final Object recordsLock = new Object();
 	private final List<ExportRecord> records = new ArrayList<>();
 	private final List<SseClient> clients = new CopyOnWriteArrayList<>();
-	private final BlockingQueue<ExportRecord> pendingRecords = new LinkedBlockingQueue<>();
+	private final BlockingDeque<ExportRecord> pendingRecords = new LinkedBlockingDeque<>(MAX_PENDING_STREAM_RECORDS);
 	private final AtomicLong nextRecordId = new AtomicLong(1);
 	private final AtomicLong nextSessionId = new AtomicLong(System.currentTimeMillis());
 	private volatile ServerSocket serverSocket;
@@ -128,8 +131,24 @@ final class VisibleFunctionExportServer {
 		ExportRecord record = new ExportRecord(nextRecordId.getAndIncrement(), payload, System.currentTimeMillis(), sessionId);
 		synchronized (recordsLock) {
 			records.add(record);
+			pruneRetainedRecords();
 		}
-		pendingRecords.offer(record);
+		offerPendingRecord(record);
+	}
+
+	private void pruneRetainedRecords() {
+		int overflow = records.size() - MAX_RETAINED_RECORDS;
+		if (overflow <= RETAINED_RECORD_PRUNE_BATCH) {
+			return;
+		}
+
+		records.subList(0, overflow).clear();
+	}
+
+	private void offerPendingRecord(ExportRecord record) {
+		while (!pendingRecords.offerLast(record)) {
+			pendingRecords.pollFirst();
+		}
 	}
 
 	private void acceptLoop() {
@@ -150,7 +169,7 @@ final class VisibleFunctionExportServer {
 	private void broadcastLoop() {
 		while (running) {
 			try {
-				ExportRecord record = pendingRecords.take();
+				ExportRecord record = pendingRecords.takeFirst();
 				List<ExportRecord> batch = new ArrayList<>();
 				batch.add(record);
 				pendingRecords.drainTo(batch, MAX_STREAM_BATCH - 1);

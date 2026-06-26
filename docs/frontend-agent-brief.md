@@ -153,6 +153,11 @@ Recommended flow:
 ### Recordings
 
 Recording captures all VisibleFunction records from start to stop and writes a standalone JSON file when stopped.
+The backend now writes the active capture to a local temp file as records arrive, then finalizes it to:
+
+```text
+visiblefunction-recordings/visiblefunction-recording-<id>.json
+```
 
 ```http
 GET /api/v1/recording/status
@@ -168,6 +173,8 @@ Status response:
   "active": "false",
   "activeId": "none",
   "activeRecords": "0",
+  "directory": "C:\\path\\to\\game\\visiblefunction-recordings",
+  "activeFile": "none",
   "completed": "1",
   "latest": "20260624-153012"
 }
@@ -200,10 +207,24 @@ Latest or specific recording response:
     "endedAtMillis": 1782295820000,
     "durationMillis": 8000,
     "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012.json",
-    "records": 128
+    "records": 128,
+    "format": "records-v1"
   },
+  "records": [
+    {
+      "id": 1,
+      "type": "COMMAND",
+      "subject": "/function demo:test",
+      "summary": "executed command"
+    }
+  ],
   "data": {
-    "counts": {},
+    "counts": {
+      "commands": 0,
+      "events": 0,
+      "functions": 0,
+      "other": 128
+    },
     "commands": [],
     "events": [],
     "functions": [],
@@ -213,6 +234,7 @@ Latest or specific recording response:
 ```
 
 Use recordings for the main WebView replay/export workflow.
+Prefer top-level `records` when present. Fall back to `data.commands/events/functions/other` for older recording files.
 
 ## 3. Record Shape
 
@@ -717,12 +739,15 @@ export type RecordingMetadata = {
   durationMillis: number
   file: string
   records: number
+  format?: string
 }
 
 export type RecordingStatus = {
   active: string
   activeId: string
   activeRecords: string
+  directory?: string
+  activeFile?: string
   completed: string
   latest: string
 }

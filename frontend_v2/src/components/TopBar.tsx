@@ -16,6 +16,7 @@ export function TopBar() {
   const baseUrl = useTraceStore((s) => s.baseUrl);
   const openLive = useTraceStore((s) => s.openLive);
   const openRecordings = useTraceStore((s) => s.openRecordings);
+  const openDatapackGraph = useTraceStore((s) => s.openDatapackGraph);
   const streamError = useTraceStore((s) => s.streamError);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -23,6 +24,7 @@ export function TopBar() {
 
   const norm = recordingStatus ? normalizeRecordingStatus(recordingStatus) : null;
   const isRecording = norm?.active ?? false;
+  const traceActionsDisabled = mode === "datapack";
 
   return (
     <header className="topbar">
@@ -51,8 +53,18 @@ export function TopBar() {
           >
             Recordings
           </button>
+          <button
+            className={"mode-tab" + (mode === "datapack" ? " is-active" : "")}
+            onClick={openDatapackGraph}
+          >
+            Datapack Graph
+          </button>
         </div>
-        {mode === "replay" && activeRecording ? (
+        {mode === "datapack" ? (
+          <span className="pill" style={{ color: "var(--selected)" }}>
+            STATIC ANALYSIS
+          </span>
+        ) : mode === "replay" && activeRecording ? (
           <span className="pill" style={{ color: "var(--function)" }}>
             REPLAY {activeRecording.id}
           </span>
@@ -79,13 +91,13 @@ export function TopBar() {
       )}
 
       <div className="topbar__actions">
-        <button onClick={togglePause} title="Pause/resume live rendering (UI only)">
+        <button onClick={togglePause} disabled={traceActionsDisabled} title="Pause/resume live rendering (UI only)">
           {paused ? "Resume" : "Pause"}
         </button>
-        <button onClick={clear} title="Clear current view (does not delete backend recordings)">
+        <button onClick={clear} disabled={traceActionsDisabled} title="Clear current view (does not delete backend recordings)">
           Clear
         </button>
-        <button onClick={() => exportData(records, activeRecording?.id)} disabled={!records.length} title="Download current dataset as JSON">
+        <button onClick={() => exportData(records, activeRecording?.id)} disabled={traceActionsDisabled || !records.length} title="Download current dataset as JSON">
           Export
         </button>
         <button onClick={() => setSettingsOpen((v) => !v)} title="Settings" aria-label="Settings">
@@ -111,6 +123,8 @@ export function TopBar() {
                   setSettingsOpen(false);
                   if (mode === "live") {
                     void connect();
+                  } else if (mode === "datapack") {
+                    openDatapackGraph();
                   } else {
                     void openRecordings();
                   }
