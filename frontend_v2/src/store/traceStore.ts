@@ -11,6 +11,7 @@ import type {
 import { DEFAULT_BASE_URL, VisibleFunctionClient, type StreamMessage } from "../api/visibleFunctionClient";
 import { buildIndexes, addToIndexes, type TraceIndexes } from "./traceIndexes";
 import { recordTick } from "./traceTime";
+import type { RelationshipGraphRequest } from "./relationshipGraph";
 
 const DEFAULT_VIEW_WINDOW_TICKS = 12 * 20; // ~12s at 20 TPS
 // Live retention is tick-based (not record-count-based) so the window stays a stable time span
@@ -70,7 +71,7 @@ type Store = {
   activeRecording: RecordingMetadata | null;
   liveSessionId: number | null;
   highlightIds: Set<number>;
-  relationshipGraphEventId: number | null;
+  relationshipGraphRequest: RelationshipGraphRequest | null;
   settings: SettingsState;
   setBaseUrl: (url: string) => void;
   setDensity: (d: SettingsState["displayDensity"]) => void;
@@ -84,7 +85,7 @@ type Store = {
   setBucket: (ticks: number) => void;
   setFilters: (patch: Partial<FilterState>) => void;
   setSelection: (s: Selection) => void;
-  openRelationshipGraph: (eventId: number) => void;
+  openRelationshipGraphForEvents: (anchorEventId: number, eventIds: number[], label: string) => void;
   closeRelationshipGraph: () => void;
   setRange: (min: number, max: number) => void;
   openLive: () => Promise<void>;
@@ -137,7 +138,7 @@ export const useTraceStore = create<Store>((set, get) => ({
   activeRecording: null,
   liveSessionId: null,
   highlightIds: new Set(),
-  relationshipGraphEventId: null,
+  relationshipGraphRequest: null,
   settings: { baseUrl: DEFAULT_BASE_URL, displayDensity: "comfortable", liveRetentionTicks: DEFAULT_LIVE_RETENTION_TICKS, liveBufferTicks: DEFAULT_LIVE_BUFFER_TICKS },
 
   setBaseUrl(url) {
@@ -267,7 +268,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       [nodeKey]: empty,
       ...empty,
       pendingRecords: [],
-      relationshipGraphEventId: null,
+      relationshipGraphRequest: null,
     });
     pendingIds.clear();
   },
@@ -314,12 +315,12 @@ export const useTraceStore = create<Store>((set, get) => ({
     set({ selection: s, highlightIds: highlight, [nodeKey]: { ...get()[nodeKey], selection: s, highlightIds: highlight } });
   },
 
-  openRelationshipGraph(eventId) {
-    set({ relationshipGraphEventId: eventId });
+  openRelationshipGraphForEvents(anchorEventId, eventIds, label) {
+    set({ relationshipGraphRequest: { anchorEventId, eventIds, label } });
   },
 
   closeRelationshipGraph() {
-    set({ relationshipGraphEventId: null });
+    set({ relationshipGraphRequest: null });
   },
 
   setRange(min, max) {
@@ -330,11 +331,11 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   async openLive() {
     if (get().mode !== "live" || get().connection !== "open") {
-      set({ mode: "live", activeRecording: null, relationshipGraphEventId: null, ...get().liveNode });
+      set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...get().liveNode });
       await get().connect();
       return;
     }
-    set({ mode: "live", activeRecording: null, relationshipGraphEventId: null, ...get().liveNode });
+    set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...get().liveNode });
   },
 
   async openRecordings() {
@@ -350,7 +351,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       activeRecording: null,
       ...empty,
       pendingRecords: [],
-      relationshipGraphEventId: null,
+      relationshipGraphRequest: null,
     });
     pendingIds.clear();
     if (!statusTimer) {
@@ -392,7 +393,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       autoScroll: false,
       paused: false,
       pendingRecords: [],
-      relationshipGraphEventId: null,
+      relationshipGraphRequest: null,
     });
     pendingIds.clear();
   },
@@ -643,7 +644,7 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     liveSessionId: sessionId,
     liveNode: empty,
     pendingRecords: [],
-    relationshipGraphEventId: null,
+    relationshipGraphRequest: null,
     ...(state.mode === "live" ? empty : {}),
   });
   pendingIds.clear();

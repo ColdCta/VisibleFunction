@@ -23,7 +23,7 @@ export function Timeline() {
   const range = useTraceStore((s) => s.range);
   const selection = useTraceStore((s) => s.selection);
   const setSelection = useTraceStore((s) => s.setSelection);
-  const openRelationshipGraph = useTraceStore((s) => s.openRelationshipGraph);
+  const openRelationshipGraphForEvents = useTraceStore((s) => s.openRelationshipGraphForEvents);
   const highlightIds = useTraceStore((s) => s.highlightIds);
   const connection = useTraceStore((s) => s.connection);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -116,10 +116,10 @@ export function Timeline() {
     setRange(lo, hi);
   }
 
-  function selectEventRecord(record: TraceRecord) {
+  function selectEventGroup(record: TraceRecord, events: TraceRecord[], label: string) {
     setSelection({ kind: "record", id: record.id });
     if (record.type === "EVENT") {
-      openRelationshipGraph(record.id);
+      openRelationshipGraphForEvents(record.id, events.map((event) => event.id), label);
     }
   }
 
@@ -175,7 +175,7 @@ export function Timeline() {
             <TickLane buckets={visibleSlice} hideIdle={filters.hideIdleTicks} enabled={filters.tick} currentBucketKey={currentBucketKey} offset={colStart} />
             <EventLane
               buckets={visibleSlice}
-              onSelect={selectEventRecord}
+              onSelect={selectEventGroup}
               onZoom={(r) => zoomToTick(recordTick(r))}
               highlightIds={highlightIds}
               currentBucketKey={currentBucketKey}
@@ -308,7 +308,7 @@ function EventLane({
   offset,
 }: {
   buckets: TimelineBucket[];
-  onSelect: (r: TraceRecord) => void;
+  onSelect: (r: TraceRecord, events: TraceRecord[], label: string) => void;
   onZoom: (r: TraceRecord) => void;
   highlightIds: Set<number>;
   currentBucketKey: string | undefined;
@@ -324,16 +324,17 @@ function EventLane({
           if (evs.length === 0) return <div key={b.key} className={"lane__cell" + currentClass} />;
           const lead = pickLead(evs);
           const extras = evs.length - 1;
+          const label = effectiveAction(lead) || lead.subject;
           return (
             <div key={b.key} className={"lane__cell lane__cell--event" + currentClass}>
               <button
                 className={"event-pill" + (highlightIds.has(lead.id) ? " is-highlight" : "")}
-                onClick={() => onSelect(lead)}
-                onDoubleClick={() => { onSelect(lead); onZoom(lead); }}
-                title={`${effectiveAction(lead) || lead.subject} (dbl-click to zoom)`}
+                onClick={() => onSelect(lead, evs, label)}
+                onDoubleClick={() => { onSelect(lead, evs, label); onZoom(lead); }}
+                title={`${label}${extras > 0 ? ` +${extras}` : ""} (dbl-click to zoom)`}
               >
                 <span className="event-pill__icon">◆</span>
-                <span className="event-pill__label">{effectiveAction(lead) || lead.subject}</span>
+                <span className="event-pill__label">{label}</span>
                 {extras > 0 && <span className="event-pill__count">+{extras}</span>}
               </button>
             </div>

@@ -654,6 +654,32 @@
   white-space: nowrap;
 }
 
+.relationship-modal__scale {
+  display: grid;
+  grid-template-columns: auto 112px 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(10, 17, 26, 0.8);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.relationship-modal__scale input {
+  width: 112px;
+  accent-color: var(--selected);
+}
+
+.relationship-modal__scale strong {
+  color: var(--text);
+  font-size: 10px;
+  text-align: right;
+}
+
 .relationship-modal__body {
   flex: 1 1 auto;
   min-height: 0;
@@ -671,9 +697,15 @@
     var(--bg-0);
 }
 
+.relationship-graph__scale-shell {
+  position: relative;
+  min-width: 560px;
+}
+
 .relationship-graph__stage {
   position: relative;
   min-width: 560px;
+  transform-origin: 0 0;
 }
 
 .relationship-graph__lane-label {
@@ -694,6 +726,7 @@
 }
 
 .relationship-graph__lane-label--event { color: #d8c1ff; border-color: rgba(166, 108, 255, 0.4); }
+.relationship-graph__lane-label--eventRecord { color: #f0ddff; border-color: rgba(166, 108, 255, 0.28); }
 .relationship-graph__lane-label--function { color: #b9d8ff; border-color: rgba(98, 168, 255, 0.4); }
 .relationship-graph__lane-label--command { color: #ffe3a4; border-color: rgba(242, 196, 91, 0.38); }
 
@@ -733,12 +766,12 @@
 .relationship-node {
   position: absolute;
   z-index: 3;
-  width: 230px;
-  height: 56px;
+  width: 250px;
+  height: 64px;
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 2px;
-  padding: 7px 9px;
+  padding: 8px 10px;
   text-align: left;
   border-radius: 7px;
   background: var(--panel-bg);
@@ -764,6 +797,16 @@
 .relationship-node--event {
   background: rgba(166, 108, 255, 0.1);
   border-color: rgba(166, 108, 255, 0.48);
+}
+
+.relationship-node--eventGroup.is-expanded {
+  border-color: rgba(80, 216, 255, 0.82);
+  box-shadow: 0 0 0 1px rgba(80, 216, 255, 0.38) inset, 0 0 20px rgba(80, 216, 255, 0.13);
+}
+
+.relationship-node--eventRecord {
+  background: rgba(166, 108, 255, 0.06);
+  border-color: rgba(216, 193, 255, 0.34);
 }
 
 .relationship-node--function {
@@ -798,13 +841,17 @@
   min-width: 0;
   color: var(--text);
   font-size: 11px;
+  line-height: 1.25;
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .relationship-node--event .relationship-node__label { color: #dac5ff; }
+.relationship-node--eventRecord .relationship-node__label { color: #f0ddff; }
 .relationship-node--function .relationship-node__label { color: var(--function); }
 .relationship-node--command .relationship-node__label { color: #ffe0a0; }
 
@@ -890,6 +937,36 @@
   line-height: 1.45;
 }
 
+.relationship-inspector__actions {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.relationship-inspector__action {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  font-size: 11px;
+}
+
+.relationship-inspector__action span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationship-inspector__action strong {
+  color: var(--event);
+}
+
 .relationship-inspector__records {
   display: flex;
   flex-wrap: wrap;
@@ -953,9 +1030,18 @@
 
   .relationship-modal__actions {
     display: grid;
-    grid-template-columns: repeat(2, minmax(72px, 1fr)) 34px;
+    grid-template-columns: repeat(2, minmax(78px, 1fr)) 34px;
     gap: 6px;
-    max-width: 214px;
+    max-width: 260px;
+  }
+
+  .relationship-modal__scale {
+    grid-column: 1 / span 3;
+    grid-template-columns: auto minmax(72px, 1fr) 38px;
+  }
+
+  .relationship-modal__scale input {
+    width: 100%;
   }
 
   .relationship-modal__actions button {
@@ -965,7 +1051,7 @@
 
   .relationship-modal__close {
     grid-column: 3;
-    grid-row: 1 / span 2;
+    grid-row: 2 / span 2;
     align-self: stretch;
   }
 

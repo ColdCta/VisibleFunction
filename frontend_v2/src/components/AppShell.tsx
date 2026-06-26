@@ -16,7 +16,7 @@ export function AppShell() {
   const setSelection = useTraceStore((s) => s.setSelection);
   const selection = useTraceStore((s) => s.selection);
   const setFilters = useTraceStore((s) => s.setFilters);
-  const relationshipGraphEventId = useTraceStore((s) => s.relationshipGraphEventId);
+  const relationshipGraphRequest = useTraceStore((s) => s.relationshipGraphRequest);
   const closeRelationshipGraph = useTraceStore((s) => s.closeRelationshipGraph);
 
   // Bootstrap: auto-connect to the backend on first mount when in live mode. Previously the app
@@ -49,14 +49,14 @@ export function AppShell() {
         return;
       }
       if (e.key === "Escape") {
-        if (relationshipGraphEventId != null) closeRelationshipGraph();
+        if (relationshipGraphRequest != null) closeRelationshipGraph();
         else if (selection) setSelection(null);
         else setFilters({ search: "" });
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeRelationshipGraph, relationshipGraphEventId, selection, setSelection, setFilters]);
+  }, [closeRelationshipGraph, relationshipGraphRequest, selection, setSelection, setFilters]);
 
   return (
     <div className="shell">
