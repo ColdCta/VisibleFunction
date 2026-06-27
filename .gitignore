@@ -3,6 +3,8 @@ build/
 out/
 run/
 visiblefunction-recordings/
+/frontend/
+/frontend_legacy/
 
 *.class
 *.log

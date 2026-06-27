@@ -3,7 +3,7 @@
 	"id": "visiblefunction",
 	"version": "${version}",
 	"name": "VisibleFunction",
-	"description": "A Fabric mod for Minecraft 26.2.",
+	"description": "A Fabric debugging toolkit for tracing commands, function calls, and events in Minecraft datapacks.",
 	"authors": [
 		"wejw1"
 	],
