@@ -6,6 +6,18 @@ VisibleFunction records commands, function calls, and the game events they produ
 
 > This project is still in early development. The target version is Minecraft 26.2.
 
+## Screenshots
+
+| Live Monitor                                                                               | Live Function Relationship Graph                                                                                          |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| <img src="docs/main.png" alt="VisibleFunction Live Monitor timeline" width="420">          | <img src="docs/branch.png" alt="VisibleFunction live function relationship graph" width="420">                            |
+| Main timeline view for inspecting tick, event, function, and command records in real time. | Function relationship graph generated from live trace records, useful for following runtime command/function/event links. |
+
+| Recording Replay                                                                    | Static Datapack Function Graph                                                            |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| <img src="docs/record.png" alt="VisibleFunction recording replay page" width="420"> | <img src="docs/map.png" alt="VisibleFunction static datapack function graph" width="420"> |
+| Recording preview and replay view for inspecting saved trace sessions.              | Static analysis graph for exploring function references and datapack structure.           |
+
 ## Features
 
 * **Command Trace**: Records raw commands, sources, function IDs, function call IDs, executors, dimensions, and positions.
@@ -195,14 +207,4 @@ docs/           API and frontend integration documentation
 
 VisibleFunction is licensed under the [MIT License](LICENSE).
 
-## Screenshots
 
-| Live Monitor                                                                               | Live Function Relationship Graph                                                                                          |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| <img src="docs/main.png" alt="VisibleFunction Live Monitor timeline" width="420">          | <img src="docs/branch.png" alt="VisibleFunction live function relationship graph" width="420">                            |
-| Main timeline view for inspecting tick, event, function, and command records in real time. | Function relationship graph generated from live trace records, useful for following runtime command/function/event links. |
-
-| Recording Replay                                                                    | Static Datapack Function Graph                                                            |
-| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| <img src="docs/record.png" alt="VisibleFunction recording replay page" width="420"> | <img src="docs/map.png" alt="VisibleFunction static datapack function graph" width="420"> |
-| Recording preview and replay view for inspecting saved trace sessions.              | Static analysis graph for exploring function references and datapack structure.           |
