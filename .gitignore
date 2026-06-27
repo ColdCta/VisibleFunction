@@ -2,17 +2,29 @@
 build/
 out/
 run/
+visiblefunction-recordings/
 
 *.class
 *.log
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.hprof
+*.heapdump
+*.tmp
 
 .idea/
+.vscode/
+.fleet/
+.agents/
 *.iml
 
 hs_err_pid*
 replay_pid*
 
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+.env
+.env.*
+!.env.example
+
+.DS_Store
+Thumbs.db
+Desktop.ini

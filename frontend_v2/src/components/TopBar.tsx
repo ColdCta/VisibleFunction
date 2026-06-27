@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTraceStore } from "../store/traceStore";
 import { normalizeRecordingStatus } from "../api/types";
+import { DEFAULT_BASE_URL } from "../api/visibleFunctionClient";
 import type { TraceRecord } from "../api/types";
 
 export function TopBar() {
@@ -115,7 +116,7 @@ export function TopBar() {
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
                 style={{ flex: 1 }}
-                placeholder="http://127.0.0.1:17654  (or 'mock')"
+                placeholder={`${DEFAULT_BASE_URL}  (or 'mock')`}
               />
               <button
                 onClick={() => {
@@ -134,7 +135,7 @@ export function TopBar() {
               </button>
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-              Default: http://127.0.0.1:17654 — type <code>mock</code> for the built-in mock server.
+              Default: {DEFAULT_BASE_URL} — type <code>mock</code> for the built-in mock server.
             </div>
           </div>
         </div>

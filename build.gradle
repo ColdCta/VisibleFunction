@@ -27,12 +27,52 @@ dependencies {
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 }
 
+def frontendDirectory = layout.projectDirectory.dir("frontend_v2")
+def npmExecutable = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("windows")
+	? "npm.cmd"
+	: "npm"
+
+tasks.register("installFrontend", Exec) {
+	workingDir frontendDirectory.asFile
+	commandLine npmExecutable, "ci"
+
+	inputs.files(
+		frontendDirectory.file("package.json"),
+		frontendDirectory.file("package-lock.json")
+	)
+	outputs.file(frontendDirectory.file("node_modules/.package-lock.json"))
+}
+
+tasks.register("buildFrontend", Exec) {
+	dependsOn tasks.named("installFrontend")
+	workingDir frontendDirectory.asFile
+	commandLine npmExecutable, "run", "build"
+
+	inputs.dir(frontendDirectory.dir("src"))
+	inputs.files(
+		frontendDirectory.file("index.html"),
+		frontendDirectory.file("package.json"),
+		frontendDirectory.file("package-lock.json"),
+		frontendDirectory.file("tsconfig.json"),
+		frontendDirectory.file("tsconfig.node.json"),
+		frontendDirectory.file("vite.config.ts")
+	)
+	outputs.dir(frontendDirectory.dir("dist"))
+}
+
 processResources {
+	dependsOn tasks.named("buildFrontend")
+
 	def version = project.version
 	inputs.property "version", version
 
 	filesMatching("fabric.mod.json") {
 		expand "version": version
+	}
+
+	from(frontendDirectory.dir("dist")) {
+		into "assets/visiblefunction/web"
+		exclude "**/*.map"
 	}
 }
 

@@ -117,9 +117,12 @@ final class VisibleFunctionCommands {
 
 	private static int setExportEnabled(CommandContext<CommandSourceStack> context, VisibleFunctionSettings settings, boolean enabled) {
 		boolean success;
+		boolean newlyStarted = false;
 		if (enabled) {
+			boolean wasRunning = VisibleFunctionExportServer.instance().running();
 			success = VisibleFunctionExportServer.instance().start(settings.exportPort());
 			settings.setExportEnabled(success);
+			newlyStarted = success && !wasRunning;
 		} else {
 			VisibleFunctionExportServer.instance().stop();
 			settings.setExportEnabled(false);
@@ -128,7 +131,10 @@ final class VisibleFunctionCommands {
 
 		if (success) {
 			String state = enabled ? "started" : "stopped";
-			String url = enabled ? " http://127.0.0.1:" + settings.exportPort() : "";
+			String url = enabled ? " " + VisibleFunctionFrontendLauncher.frontendUrl(settings.exportPort()) : "";
+			if (newlyStarted) {
+				VisibleFunctionFrontendLauncher.openIfClient(settings.exportPort());
+			}
 			context.getSource().sendSuccess(() -> Component.literal("VisibleFunction export " + state + url), false);
 			return 1;
 		}
@@ -207,6 +213,7 @@ final class VisibleFunctionCommands {
 			+ "- running: " + VisibleFunctionExportServer.instance().running() + "\n"
 			+ "- port: " + settings.exportPort() + "\n"
 			+ "- records: " + VisibleFunctionExportServer.instance().recordCount() + "\n"
+			+ "- frontend: " + VisibleFunctionFrontendLauncher.frontendUrl(settings.exportPort()) + "\n"
 			+ "- health: http://127.0.0.1:" + settings.exportPort() + "/health\n"
 			+ "- records: http://127.0.0.1:" + settings.exportPort() + "/api/v1/records\n"
 			+ "- grouped: http://127.0.0.1:" + settings.exportPort() + "/api/v1/grouped\n"

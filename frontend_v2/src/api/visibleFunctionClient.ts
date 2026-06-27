@@ -119,7 +119,12 @@ export class VisibleFunctionClient {
   }
 }
 
-export const DEFAULT_BASE_URL = "http://127.0.0.1:17654";
+const PAGE_ORIGIN =
+  typeof window !== "undefined" && (window.location.protocol === "http:" || window.location.protocol === "https:")
+    ? window.location.origin
+    : "";
+
+export const DEFAULT_BASE_URL = PAGE_ORIGIN || "http://127.0.0.1:17654";
 
 function qs(params: { after?: number; limit?: number; tail?: boolean }): string {
   const q = new URLSearchParams();

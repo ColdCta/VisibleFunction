@@ -4,6 +4,7 @@ import com.visiblefunction.VisibleFunctionExportJson.ExportRecord;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
@@ -31,6 +32,7 @@ final class VisibleFunctionExportServer {
 	private static final int MAX_RETAINED_RECORDS = 20000;
 	private static final int RETAINED_RECORD_PRUNE_BATCH = 1000;
 	private static final int MAX_PENDING_STREAM_RECORDS = 8192;
+	private static final String FRONTEND_RESOURCE_ROOT = "/assets/visiblefunction/web";
 	private static final VisibleFunctionExportServer INSTANCE = new VisibleFunctionExportServer();
 
 	private final Object recordsLock = new Object();
@@ -224,6 +226,7 @@ final class VisibleFunctionExportServer {
 			}
 
 			switch (path) {
+				case "/", "/index.html" -> writeFrontendResource(socket, path);
 				case "/health" -> writeJson(socket, VisibleFunctionExportJson.health(running, port, recordCount(), sessionId));
 				case "/api/v1/records" -> writeJson(socket, recordsResponse(query));
 				case "/api/v1/grouped" -> writeJson(socket, groupedResponse(query));
@@ -237,6 +240,8 @@ final class VisibleFunctionExportServer {
 					if (path.startsWith("/api/v1/recordings/")) {
 						String id = decode(path.substring("/api/v1/recordings/".length()));
 						writeJson(socket, VisibleFunctionRecordingManager.instance().recordingJson(id));
+					} else if (path.startsWith("/assets/")) {
+						writeFrontendResource(socket, path);
 					} else {
 						writeText(socket, 404, "Not Found", "text/plain; charset=utf-8", "VisibleFunction export endpoint not found.");
 					}
@@ -339,19 +344,120 @@ final class VisibleFunctionExportServer {
 		writeText(socket, 200, "OK", "application/json; charset=utf-8", body);
 	}
 
+	private static void writeFrontendResource(Socket socket, String path) throws IOException {
+		String decodedPath;
+		try {
+			decodedPath = decode(path);
+		} catch (IllegalArgumentException exception) {
+			writeText(socket, 400, "Bad Request", "text/plain; charset=utf-8", "Invalid frontend resource path.");
+			return;
+		}
+
+		if (decodedPath.indexOf('\0') >= 0 || decodedPath.contains("\\") || containsParentSegment(decodedPath)) {
+			writeText(socket, 400, "Bad Request", "text/plain; charset=utf-8", "Invalid frontend resource path.");
+			return;
+		}
+
+		String relativePath = switch (decodedPath) {
+			case "/", "/index.html" -> "/index.html";
+			default -> decodedPath.startsWith("/assets/") ? decodedPath : null;
+		};
+		if (relativePath == null) {
+			writeText(socket, 404, "Not Found", "text/plain; charset=utf-8", "VisibleFunction frontend resource not found.");
+			return;
+		}
+
+		String resourcePath = FRONTEND_RESOURCE_ROOT + relativePath;
+		try (InputStream resource = VisibleFunctionExportServer.class.getResourceAsStream(resourcePath)) {
+			if (resource == null) {
+				writeText(socket, 404, "Not Found", "text/plain; charset=utf-8", "VisibleFunction frontend resource not found.");
+				return;
+			}
+
+			boolean index = "/index.html".equals(relativePath);
+			String cacheControl = index ? "no-cache" : "public, max-age=31536000, immutable";
+			writeBytes(socket, 200, "OK", contentType(relativePath), resource.readAllBytes(), cacheControl);
+		}
+	}
+
 	private static void writeText(Socket socket, int status, String reason, String contentType, String body) throws IOException {
 		byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+		writeBytes(socket, status, reason, contentType, bytes, null);
+	}
+
+	private static void writeBytes(
+		Socket socket,
+		int status,
+		String reason,
+		String contentType,
+		byte[] bytes,
+		String cacheControl
+	) throws IOException {
 		OutputStream output = socket.getOutputStream();
 		PrintWriter writer = new PrintWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8), false);
 		writer.print("HTTP/1.1 " + status + " " + reason + "\r\n");
 		writer.print("Content-Type: " + contentType + "\r\n");
 		writer.print("Content-Length: " + bytes.length + "\r\n");
+		if (cacheControl != null) {
+			writer.print("Cache-Control: " + cacheControl + "\r\n");
+		}
 		writer.print("Access-Control-Allow-Origin: *\r\n");
+		writer.print("X-Content-Type-Options: nosniff\r\n");
 		writer.print("Connection: close\r\n");
 		writer.print("\r\n");
 		writer.flush();
 		output.write(bytes);
 		output.flush();
+	}
+
+	private static boolean containsParentSegment(String path) {
+		for (String segment : path.split("/", -1)) {
+			if ("..".equals(segment)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static String contentType(String path) {
+		String normalized = path.toLowerCase(Locale.ROOT);
+		if (normalized.endsWith(".html")) {
+			return "text/html; charset=utf-8";
+		}
+		if (normalized.endsWith(".js") || normalized.endsWith(".mjs")) {
+			return "text/javascript; charset=utf-8";
+		}
+		if (normalized.endsWith(".css")) {
+			return "text/css; charset=utf-8";
+		}
+		if (normalized.endsWith(".json") || normalized.endsWith(".map")) {
+			return "application/json; charset=utf-8";
+		}
+		if (normalized.endsWith(".svg")) {
+			return "image/svg+xml";
+		}
+		if (normalized.endsWith(".png")) {
+			return "image/png";
+		}
+		if (normalized.endsWith(".webp")) {
+			return "image/webp";
+		}
+		if (normalized.endsWith(".jpg") || normalized.endsWith(".jpeg")) {
+			return "image/jpeg";
+		}
+		if (normalized.endsWith(".ico")) {
+			return "image/x-icon";
+		}
+		if (normalized.endsWith(".woff2")) {
+			return "font/woff2";
+		}
+		if (normalized.endsWith(".woff")) {
+			return "font/woff";
+		}
+		if (normalized.endsWith(".ttf")) {
+			return "font/ttf";
+		}
+		return "application/octet-stream";
 	}
 
 	private static Map<String, String> parseQuery(String query) {
