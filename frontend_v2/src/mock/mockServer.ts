@@ -492,17 +492,86 @@ function mockDatapackAnalysis(): DatapackAnalysisResponse {
       variables: ["score:#wave:wave", "scoreboard:wave"],
     },
   ];
+  const targetSelector = selector("@e[type=zombie,tag=target,scores={damage=1..}]", "@e", {
+    type: "zombie",
+    tag: "target",
+    scores: "{damage=1..}",
+  });
+  const selfSelector = selector("@s[tag=wtw.damage]", "@s", { tag: "wtw.damage" });
+  const waveSelector = selector("@e[type=minecraft:zombie,tag=wave,limit=8]", "@e", {
+    type: "minecraft:zombie",
+    tag: "wave",
+    limit: "8",
+  });
   const edges = [
     edge("wtw:tick", "wtw:fight_system/on_hit", "direct", 2, "/function wtw:fight_system/on_hit"),
+    edge("wtw:tick", "wtw:fight_system/on_hit", "direct", 3, "/execute if score #damage damage matches 1.. run function wtw:fight_system/on_hit", "none", {
+      conditionSummary: "if score #damage damage matches 1..",
+      variablesRead: ["score:#damage:damage"],
+      execute: executeContext({
+        conditions: [clause("if", "score", "if score #damage damage matches 1..", "#damage damage", "if score #damage damage matches 1..", ["score:#damage:damage"])],
+        runCommand: "function wtw:fight_system/on_hit",
+      }),
+    }),
     edge("wtw:tick", "wtw:cleanup/temp", "direct", 6, "/function wtw:cleanup/temp"),
-    edge("wtw:fight_system/on_hit", "wtw:damage_core", "direct", 4, "/execute as @s run function wtw:damage_core"),
+    edge("wtw:fight_system/on_hit", "wtw:damage_core", "direct", 4, "/execute as @s if entity @e[type=zombie,tag=target,scores={damage=1..}] run function wtw:damage_core", "none", {
+      conditionSummary: "as @s if entity @e[type=zombie,tag=target]",
+      selectors: [selfSelector, targetSelector],
+      variablesRead: ["score:@s:damage", "tag:target"],
+      execute: executeContext({
+        contextModifiers: [clause("context", "as", "as @s", "@s", "as @s", [], [selfSelector])],
+        conditions: [clause("if", "entity", "if entity @e[type=zombie,tag=target,scores={damage=1..}]", targetSelector.raw, "if entity @e[type=zombie,tag=target]", ["score:@s:damage", "tag:target"], [targetSelector])],
+        runCommand: "function wtw:damage_core",
+      }),
+    }),
+    edge("wtw:fight_system/on_hit", "wtw:damage_core", "direct", 5, "/execute as @s if score @s damage matches 1.. run function wtw:damage_core", "none", {
+      conditionSummary: "as @s if score @s damage matches 1..",
+      selectors: [selfSelector],
+      variablesRead: ["score:@s:damage"],
+      execute: executeContext({
+        contextModifiers: [clause("context", "as", "as @s", "@s", "as @s", [], [selfSelector])],
+        conditions: [clause("if", "score", "if score @s damage matches 1..", "@s damage", "if score @s damage matches 1..", ["score:@s:damage"], [selfSelector])],
+        runCommand: "function wtw:damage_core",
+      }),
+    }),
     edge("wtw:fight_system/on_hit", "wtw:display_damage", "tag", 9, "/function #wtw:damage_display", "wtw:damage_display"),
-    edge("wtw:damage_core", "wtw:damage_modifier_notcritical", "direct", 7, "/return run function wtw:damage_modifier_notcritical"),
-    edge("wtw:damage_core", "wtw:result_writer", "direct", 11, "/function wtw:result_writer"),
+    edge("wtw:fight_system/on_hit", "wtw:display_damage", "tag", 12, "/execute if entity @s[tag=wtw.damage] run function #wtw:damage_display", "wtw:damage_display", {
+      conditionSummary: "if entity @s[tag=wtw.damage]",
+      selectors: [selfSelector],
+      variablesRead: ["tag:wtw.damage"],
+      execute: executeContext({
+        conditions: [clause("if", "entity", "if entity @s[tag=wtw.damage]", selfSelector.raw, "if entity @s[tag=wtw.damage]", ["tag:wtw.damage"], [selfSelector])],
+        runCommand: "function #wtw:damage_display",
+      }),
+    }),
+    edge("wtw:damage_core", "wtw:damage_modifier_notcritical", "direct", 7, "/execute if function wtw:crit_check run function wtw:damage_modifier_notcritical", "none", {
+      conditionSummary: "if function wtw:crit_check",
+      execute: executeContext({
+        conditions: [clause("if", "function", "if function wtw:crit_check", "wtw:crit_check", "if function wtw:crit_check")],
+        runCommand: "function wtw:damage_modifier_notcritical",
+      }),
+    }),
+    edge("wtw:damage_core", "wtw:result_writer", "direct", 11, "/execute store result storage wtw:temp damage.current int 1 run function wtw:result_writer", "none", {
+      conditionSummary: "store result storage wtw:temp damage.current",
+      variablesWritten: ["storage:wtw:temp damage.current"],
+      execute: executeContext({
+        stores: [clause("store", "storage", "store result storage wtw:temp damage.current int 1", "wtw:temp damage.current", "store result storage wtw:temp damage.current", ["storage:wtw:temp damage.current"])],
+        runCommand: "function wtw:result_writer",
+      }),
+    }),
     edge("wtw:damage_modifier_notcritical", "wtw:result_writer", "direct", 8, "/function wtw:result_writer"),
     edge("wtw:result_writer", "wtw:display_damage", "direct", 6, "/function wtw:display_damage"),
     edge("wtw:display_damage", "wtw:cleanup/temp", "direct", 10, "/function wtw:cleanup/temp"),
     edge("demo:scheduled_wave", "demo:spawn_wave", "scheduled", 3, "/schedule function demo:spawn_wave 20t"),
+    edge("demo:scheduled_wave", "demo:spawn_wave", "direct", 4, "/execute if entity @e[type=minecraft:zombie,tag=wave,limit=8] run function demo:spawn_wave", "none", {
+      conditionSummary: "if entity @e[type=zombie,tag=wave]",
+      selectors: [waveSelector],
+      variablesRead: ["tag:wave"],
+      execute: executeContext({
+        conditions: [clause("if", "entity", "if entity @e[type=minecraft:zombie,tag=wave,limit=8]", waveSelector.raw, "if entity @e[type=zombie,tag=wave]", ["tag:wave"], [waveSelector])],
+        runCommand: "function demo:spawn_wave",
+      }),
+    }),
     edge("demo:scheduled_wave", "#demo:missing_wave", "tag", 7, "/function #demo:missing_wave", "demo:missing_wave"),
   ];
   const variables = [
@@ -525,7 +594,12 @@ function mockDatapackAnalysis(): DatapackAnalysisResponse {
     },
     functions,
     edges,
+    commands: edges.map((e, index) => commandFromEdge(e, index + 1)),
     variables,
+    graph: graphFromMock(functions, edges, {
+      "minecraft:tick": ["wtw:tick"],
+      "wtw:damage_display": ["wtw:display_damage"],
+    }),
     tags: {
       "minecraft:tick": ["wtw:tick"],
       "wtw:damage_display": ["wtw:display_damage"],
@@ -533,8 +607,160 @@ function mockDatapackAnalysis(): DatapackAnalysisResponse {
   };
 }
 
-function edge(from: string, to: string, kind: string, line: number, command: string, viaTag = "none") {
-  return { from, to, kind, viaTag, line, command };
+function edge(
+  from: string,
+  to: string,
+  kind: string,
+  line: number,
+  command: string,
+  viaTag = "none",
+  extra: Partial<{
+    rawCommand: string;
+    effectiveCommand: string;
+    conditionSummary: string;
+    execute: ReturnType<typeof executeContext>;
+    selectors: ReturnType<typeof selector>[];
+    variablesRead: string[];
+    variablesWritten: string[];
+  }> = {}
+) {
+  return {
+    id: `${from}:${to}:${kind}:${line}`,
+    from,
+    to,
+    kind,
+    viaTag,
+    line,
+    command,
+    rawCommand: extra.rawCommand ?? command,
+    effectiveCommand: extra.effectiveCommand ?? command.replace(/^\/?execute .* run /, ""),
+    conditionSummary: extra.conditionSummary ?? "none",
+    execute: extra.execute ?? executeContext({ runCommand: command }),
+    selectors: extra.selectors ?? [],
+    variablesRead: extra.variablesRead ?? [],
+    variablesWritten: extra.variablesWritten ?? [],
+  };
+}
+
+function commandFromEdge(e: ReturnType<typeof edge>, index: number) {
+  const tag = e.to.startsWith("#") || e.viaTag !== "none";
+  return {
+    id: `cmd-${index}`,
+    function: e.from,
+    line: e.line,
+    rawCommand: e.rawCommand,
+    effectiveCommand: e.effectiveCommand,
+    rootCommand: e.command.trim().split(/\s+/)[0]?.replace("/", "") || "function",
+    conditionSummary: e.conditionSummary,
+    execute: e.execute,
+    calls: [
+      {
+        id: tag ? e.viaTag.replace(/^#/, "") : e.to,
+        tag,
+        kind: e.kind,
+      },
+    ],
+    variables: [
+      ...e.variablesRead.map((key) => variableRef(key, "read")),
+      ...e.variablesWritten.map((key) => variableRef(key, "write")),
+    ],
+    variablesRead: e.variablesRead,
+    variablesWritten: e.variablesWritten,
+    selectors: e.selectors,
+  };
+}
+
+function graphFromMock(functions: Array<{ id: string; pack: string; tickRoot: boolean; tickFunction: boolean; calledBy: string[] }>, edges: ReturnType<typeof edge>[], tags: Record<string, string[]>) {
+  const edgeGroups = new Map<string, ReturnType<typeof edge>[]>();
+  for (const e of edges) {
+    const key = `${e.from}|${e.to}|${e.kind}`;
+    const group = edgeGroups.get(key);
+    if (group) group.push(e);
+    else edgeGroups.set(key, [e]);
+  }
+  const graphEdges = Array.from(edgeGroups.values()).map((group) => ({
+    from: group[0].from,
+    to: group[0].to,
+    kind: group[0].kind,
+    callCount: group.length,
+    lines: group.map((e) => e.line),
+    conditionSummaries: Array.from(new Set(group.map((e) => e.conditionSummary).filter((value) => value && value !== "none"))),
+    sampleCommands: Array.from(new Set(group.map((e) => e.command))).slice(0, 4),
+  }));
+  const degree = new Map<string, { in: number; out: number }>();
+  for (const fn of functions) degree.set(fn.id, { in: 0, out: 0 });
+  for (const e of graphEdges) {
+    (degree.get(e.from) ?? degree.set(e.from, { in: 0, out: 0 }).get(e.from)!).out += e.callCount;
+    (degree.get(e.to) ?? degree.set(e.to, { in: 0, out: 0 }).get(e.to)!).in += e.callCount;
+  }
+  const modules = Array.from(new Set(functions.map((fn) => fn.pack))).sort().map((pack) => ({
+    id: pack,
+    namespace: pack.split("/").pop() ?? pack,
+    functionCount: functions.filter((fn) => fn.pack === pack).length,
+    functions: functions.filter((fn) => fn.pack === pack).map((fn) => fn.id),
+  }));
+  return {
+    nodes: functions.map((fn) => {
+      const d = degree.get(fn.id) ?? { in: 0, out: 0 };
+      return {
+        id: fn.id,
+        module: fn.pack,
+        namespace: fn.id.split(":")[0] ?? "",
+        entrypoint: fn.tickRoot ? "tickRoot" : fn.calledBy.length === 0 ? "noCaller" : "none",
+        tickRoot: fn.tickRoot,
+        tickFunction: fn.tickFunction,
+        degree: d.in + d.out,
+        inDegree: d.in,
+        outDegree: d.out,
+      };
+    }),
+    edges: graphEdges,
+    modules,
+    entrypoints: {
+      tickRoots: tags["minecraft:tick"] ?? [],
+      loadRoots: [],
+      noCaller: functions.filter((fn) => fn.calledBy.length === 0).map((fn) => fn.id),
+      publicTags: Object.keys(tags).filter((tag) => !tag.startsWith("minecraft:")),
+    },
+    warnings: ["Function demo:scheduled_wave references empty or missing tag #demo:missing_wave at line 7"],
+  };
+}
+
+function executeContext({
+  clauses = [],
+  conditions = [],
+  stores = [],
+  contextModifiers = [],
+  runCommand = "",
+}: Partial<{
+  clauses: ReturnType<typeof clause>[];
+  conditions: ReturnType<typeof clause>[];
+  stores: ReturnType<typeof clause>[];
+  contextModifiers: ReturnType<typeof clause>[];
+  runCommand: string;
+}>) {
+  return {
+    present: clauses.length + conditions.length + stores.length + contextModifiers.length > 0 || runCommand.startsWith("function"),
+    clauses: [...clauses, ...contextModifiers, ...conditions, ...stores],
+    conditions,
+    stores,
+    contextModifiers,
+    runCommand,
+  };
+}
+
+function clause(mode: string, keyword: string, raw: string, subject: string, summary: string, variables: string[] = [], selectors: ReturnType<typeof selector>[] = []) {
+  return { mode, keyword, raw, subject, summary, variables, selectors };
+}
+
+function selector(raw: string, target: string, filters: Record<string, string>) {
+  return { raw, target, filters };
+}
+
+function variableRef(key: string, access: string) {
+  const first = key.indexOf(":");
+  const kind = first > 0 ? key.slice(0, first) : "unknown";
+  return { key, kind, name: key.slice(first + 1), access };
 }
 
 function variable(key: string, kind: string, name: string, reads: number, writes: number, fn: string) {

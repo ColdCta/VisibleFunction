@@ -5,6 +5,7 @@ import { QuickViewPresets, type QuickViewId } from "./quickViews";
 
 export function Sidebar() {
   const records = useTraceStore((s) => s.records);
+  const stats = useTraceStore((s) => s.stats);
   const range = useTraceStore((s) => s.range);
   const viewRange = useTraceStore((s) => s.viewRange);
   const setRange = useTraceStore((s) => s.setRange);
@@ -16,19 +17,19 @@ export function Sidebar() {
   const setLiveBuffer = useTraceStore((s) => s.setLiveBuffer);
 
   const world = records[0] ? recordDimension(records[0]) : "minecraft:overworld";
-  const startedAt = records[0]?.timestampMillis;
-  const lastAt = records[records.length - 1]?.timestampMillis;
+  const startedAt = stats.startedAtMillis;
+  const lastAt = stats.lastAtMillis;
   const durationMs = startedAt && lastAt ? lastAt - startedAt : 0;
   const minutes = Math.floor(durationMs / 60000).toString().padStart(2, "0");
   const seconds = Math.floor((durationMs % 60000) / 1000).toString().padStart(2, "0");
   // "Ticks captured" = tick span of the dataset (doc :360), not bucket count.
-  const tickSpan = records.length ? Math.max(0, Math.floor(range.max - range.min)) : 0;
+  const tickSpan = stats.recordCount ? Math.max(0, Math.floor(range.max - range.min)) : 0;
 
   return (
     <aside className="sidebar">
       <SessionPanel
         world={world}
-        recordCount={records.length}
+        recordCount={stats.recordCount}
         startedAt={startedAt}
         duration={`${minutes}:${seconds}`}
         tickSpan={tickSpan}

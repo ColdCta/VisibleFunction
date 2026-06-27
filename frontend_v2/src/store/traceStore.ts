@@ -24,6 +24,9 @@ const DEFAULT_LIVE_BUFFER_TICKS = 10 * 20;    // 10s buffer (not shown)
 // of every animation frame. This keeps the timeline smooth instead of stuttering when hundreds of
 // records arrive per second.
 const FLUSH_THROTTLE_MS = 80;
+const BACKGROUND_FLUSH_THROTTLE_MS = 650;
+const LIVE_WARMUP_AFTER_MS = 5000;
+const LIVE_WARMUP_RECORD_THRESHOLD = 2500;
 // Initial backfill on connect: only the most recent window is fetched as a seed + anchor for the
 // polling `after` cursor. Full history is the Recordings/Replay flow's job. Previously this was
 // 5000 records with a synchronous buildIndexes over all of them, which froze the UI on connect
@@ -44,6 +47,28 @@ type TraceNodeState = {
   viewRange: { min: number; max: number };
   selection: Selection;
   highlightIds: Set<number>;
+  stats: TraceStats;
+};
+
+export type TraceTickSummary = {
+  startTick: number;
+  endTick: number;
+  records: number;
+  commands: number;
+  events: number;
+  functions: number;
+};
+
+export type TraceStats = {
+  recordCount: number;
+  commandCount: number;
+  eventCount: number;
+  functionCallCount: number;
+  startedAtMillis: number | undefined;
+  lastAtMillis: number | undefined;
+  tickMin: number;
+  tickMax: number;
+  tickSummary: TraceTickSummary[];
 };
 
 type Store = {
@@ -58,6 +83,7 @@ type Store = {
   // Current-view mirror (live or replay).
   records: TraceRecord[];
   indexes: TraceIndexes;
+  stats: TraceStats;
   liveNode: TraceNodeState;
   recordNode: TraceNodeState;
   selection: Selection;
@@ -70,6 +96,8 @@ type Store = {
   recordings: RecordingMetadata[];
   activeRecording: RecordingMetadata | null;
   liveSessionId: number | null;
+  liveLastVisibleAt: number;
+  liveWarmupState: "idle" | "warming" | "ready";
   highlightIds: Set<number>;
   relationshipGraphRequest: RelationshipGraphRequest | null;
   settings: SettingsState;
@@ -103,8 +131,20 @@ let streamClose: (() => void) | null = null;
 let pollTimer: number | null = null;
 let statusTimer: number | null = null;
 let flushTimer: number | null = null;
+let liveWarmupTimer: number | null = null;
 let lastFlushTime = 0;
 const pendingIds = new Set<number>();
+const EMPTY_STATS: TraceStats = {
+  recordCount: 0,
+  commandCount: 0,
+  eventCount: 0,
+  functionCallCount: 0,
+  startedAtMillis: undefined,
+  lastAtMillis: undefined,
+  tickMin: 0,
+  tickMax: 0,
+  tickSummary: [],
+};
 
 export const useTraceStore = create<Store>((set, get) => ({
   baseUrl: DEFAULT_BASE_URL,
@@ -117,6 +157,7 @@ export const useTraceStore = create<Store>((set, get) => ({
   pendingRecords: [],
   records: [],
   indexes: buildIndexes([]),
+  stats: EMPTY_STATS,
   liveNode: emptyTraceNode(),
   recordNode: emptyTraceNode(),
   selection: null,
@@ -138,6 +179,8 @@ export const useTraceStore = create<Store>((set, get) => ({
   recordings: [],
   activeRecording: null,
   liveSessionId: null,
+  liveLastVisibleAt: Date.now(),
+  liveWarmupState: "ready",
   highlightIds: new Set(),
   relationshipGraphRequest: null,
   settings: { baseUrl: DEFAULT_BASE_URL, displayDensity: "comfortable", liveRetentionTicks: DEFAULT_LIVE_RETENTION_TICKS, liveBufferTicks: DEFAULT_LIVE_BUFFER_TICKS },
@@ -332,17 +375,31 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   async openLive() {
     const state = get();
+    const age = Date.now() - state.liveLastVisibleAt;
+    const shouldWarm =
+      age > LIVE_WARMUP_AFTER_MS ||
+      state.liveNode.records.length > LIVE_WARMUP_RECORD_THRESHOLD ||
+      state.pendingRecords.length > LIVE_WARMUP_RECORD_THRESHOLD;
+    const livePatch = {
+      mode: "live" as const,
+      activeRecording: null,
+      relationshipGraphRequest: null,
+      liveWarmupState: shouldWarm ? "warming" as const : "ready" as const,
+      ...state.liveNode,
+    };
     if (state.connection === "open" || state.connection === "reconnecting") {
-      set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...state.liveNode });
+      set(livePatch);
+      if (shouldWarm) scheduleLiveWarmupReady();
       return;
     }
-    set({ mode: "live", activeRecording: null, relationshipGraphRequest: null, ...state.liveNode });
+    set(livePatch);
+    if (shouldWarm) scheduleLiveWarmupReady();
     await get().connect();
   },
 
   async openRecordings() {
     const current = get();
-    const liveNode = current.mode === "live" ? currentTraceNode(current) : current.liveNode;
+    const liveNode = current.mode === "live" ? snapshotCurrentNode(current) : current.liveNode;
     stopLiveStream();
     const empty = emptyTraceNode();
     set({
@@ -354,6 +411,8 @@ export const useTraceStore = create<Store>((set, get) => ({
       ...empty,
       pendingRecords: [],
       relationshipGraphRequest: null,
+      liveLastVisibleAt: current.mode === "live" ? Date.now() : current.liveLastVisibleAt,
+      liveWarmupState: "idle",
     });
     pendingIds.clear();
     if (!statusTimer) {
@@ -375,11 +434,13 @@ export const useTraceStore = create<Store>((set, get) => ({
     const patch: Partial<Store> = {
       mode: "datapack",
       relationshipGraphRequest: null,
+      liveWarmupState: "idle",
     };
     if (current.mode === "live") {
-      patch.liveNode = currentTraceNode(current);
+      patch.liveNode = snapshotCurrentNode(current);
+      patch.liveLastVisibleAt = Date.now();
     } else if (current.mode === "replay") {
-      patch.recordNode = currentTraceNode(current);
+      patch.recordNode = snapshotCurrentNode(current);
     }
     set(patch);
   },
@@ -444,8 +505,8 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   ingestRecord(r) {
     const cur = get();
-    const liveNode = cur.mode === "live" ? currentTraceNode(cur) : cur.liveNode;
-    if (liveNode.indexes.recordsById.has(r.id) || pendingIds.has(r.id)) return;
+    const liveIndexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
+    if (liveIndexes.recordsById.has(r.id) || pendingIds.has(r.id)) return;
     // Immutable update (the previous frontend mutated the array in place).
     pendingIds.add(r.id);
     set({ pendingRecords: [...cur.pendingRecords, r] });
@@ -458,13 +519,39 @@ export const useTraceStore = create<Store>((set, get) => ({
 // the next animation frame; otherwise defer by the remaining throttle window.
 function scheduleFlush() {
   if (flushTimer !== null) return;
+  const state = useTraceStore.getState();
+  const throttle = state.mode === "live" ? FLUSH_THROTTLE_MS : BACKGROUND_FLUSH_THROTTLE_MS;
   const elapsed = performance.now() - lastFlushTime;
-  const delay = Math.max(0, FLUSH_THROTTLE_MS - elapsed);
+  const delay = Math.max(0, throttle - elapsed);
   flushTimer = window.setTimeout(() => {
     flushTimer = null;
     lastFlushTime = performance.now();
     requestAnimationFrame(() => flushPending());
   }, delay);
+}
+
+function scheduleLiveWarmupReady() {
+  if (liveWarmupTimer !== null) {
+    window.clearTimeout(liveWarmupTimer);
+    liveWarmupTimer = null;
+  }
+  const run = () => {
+    liveWarmupTimer = null;
+    const state = useTraceStore.getState();
+    if (state.mode !== "live") return;
+    if (!state.paused && state.pendingRecords.length > 0) {
+      flushPending();
+    }
+    const latest = useTraceStore.getState();
+    if (latest.mode !== "live") return;
+    useTraceStore.setState({ liveWarmupState: "ready", ...latest.liveNode });
+  };
+  const idle = window.requestIdleCallback as ((cb: () => void, options?: { timeout: number }) => number) | undefined;
+  if (idle) {
+    liveWarmupTimer = idle(run, { timeout: 250 }) as unknown as number;
+  } else {
+    liveWarmupTimer = window.setTimeout(run, 80);
+  }
 }
 
 function stopLiveStream() {
@@ -479,6 +566,10 @@ function stopLiveStream() {
   if (flushTimer) {
     window.clearTimeout(flushTimer);
     flushTimer = null;
+  }
+  if (liveWarmupTimer) {
+    window.clearTimeout(liveWarmupTimer);
+    liveWarmupTimer = null;
   }
 }
 
@@ -497,7 +588,7 @@ function flushPending() {
   // Incremental index update: reuse the existing indexes and add only the new pending records.
   // This makes a flush cost O(pending) instead of O(total). The indexes object is mutated in
   // place; a fresh node wraps it so subscribers still see a new reference.
-  const indexes = cur.indexes;
+  const indexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
   if (pending.length) {
     for (const r of pending) addToIndexes(indexes, r);
   }
@@ -524,17 +615,20 @@ function flushPending() {
     : fullRange;
   const newView = cur.autoScroll ? lastWindow(nr) : clampViewRange(baseViewRange, nr);
   const finalIndexes = trimmed ? buildIndexes(merged) : indexes;
+  const selection = sanitizeSelection(cur.selection, finalIndexes);
+  const highlightIds = selection === cur.selection ? cur.highlightIds : new Set<number>();
   const node: TraceNodeState = {
     records: merged,
     indexes: finalIndexes,
     range: nr,
     viewRange: newView,
-    selection: cur.selection,
-    highlightIds: cur.highlightIds,
+    selection,
+    highlightIds,
+    stats: computeTraceStats(merged),
   };
 
   if (cur.mode === "live") {
-    useTraceStore.setState({ liveNode: node, ...node, pendingRecords: [] });
+    useTraceStore.setState({ liveNode: node, ...node, pendingRecords: [], liveWarmupState: cur.liveWarmupState === "warming" ? "warming" : "ready" });
   } else {
     useTraceStore.setState({ liveNode: node, pendingRecords: [] });
   }
@@ -559,11 +653,20 @@ function traceNode(
     viewRange,
     selection,
     highlightIds,
+    stats: computeTraceStats(records),
   };
 }
 
-function currentTraceNode(state: Store): TraceNodeState {
-  return traceNode(state.records, state.range, state.viewRange, state.selection, state.highlightIds);
+function snapshotCurrentNode(state: Store): TraceNodeState {
+  return {
+    records: state.records,
+    indexes: state.indexes,
+    range: state.range,
+    viewRange: state.viewRange,
+    selection: state.selection,
+    highlightIds: state.highlightIds,
+    stats: state.stats,
+  };
 }
 
 function activeNodeKey(mode: Mode): "liveNode" | "recordNode" {
@@ -607,6 +710,86 @@ function computeRange(records: TraceRecord[]): { min: number; max: number } {
     if (tick > max) max = tick;
   }
   return { min, max };
+}
+
+function computeTraceStats(records: TraceRecord[]): TraceStats {
+  if (records.length === 0) return EMPTY_STATS;
+  let commandCount = 0;
+  let eventCount = 0;
+  let tickMin = Infinity;
+  let tickMax = -Infinity;
+  const functionCalls = new Set<string>();
+  const startedAtMillis = records[0]?.timestampMillis;
+  const lastAtMillis = records[records.length - 1]?.timestampMillis;
+
+  for (const record of records) {
+    if (record.type === "COMMAND") commandCount++;
+    else if (record.type === "EVENT") eventCount++;
+    const functionCallId = record.commandContext.functionCallId;
+    if (functionCallId && functionCallId !== "none") functionCalls.add(functionCallId);
+    const tick = recordTick(record);
+    if (tick < tickMin) tickMin = tick;
+    if (tick > tickMax) tickMax = tick;
+  }
+
+  return {
+    recordCount: records.length,
+    commandCount,
+    eventCount,
+    functionCallCount: functionCalls.size,
+    startedAtMillis,
+    lastAtMillis,
+    tickMin,
+    tickMax,
+    tickSummary: buildTickSummary(records, tickMin, tickMax),
+  };
+}
+
+function buildTickSummary(records: TraceRecord[], tickMin: number, tickMax: number): TraceTickSummary[] {
+  const span = Math.max(1, tickMax - tickMin + 1);
+  const bucketTicks = Math.max(1, Math.ceil(span / 360));
+  const buckets = new Map<number, TraceTickSummary & { functionIds: Set<string> }>();
+  for (const record of records) {
+    const tick = recordTick(record);
+    const startTick = Math.floor(tick / bucketTicks) * bucketTicks;
+    let bucket = buckets.get(startTick);
+    if (!bucket) {
+      bucket = {
+        startTick,
+        endTick: startTick + bucketTicks,
+        records: 0,
+        commands: 0,
+        events: 0,
+        functions: 0,
+        functionIds: new Set(),
+      };
+      buckets.set(startTick, bucket);
+    }
+    bucket.records++;
+    if (record.type === "COMMAND") bucket.commands++;
+    else if (record.type === "EVENT") bucket.events++;
+    const functionCallId = record.commandContext.functionCallId;
+    if (functionCallId && functionCallId !== "none") bucket.functionIds.add(functionCallId);
+  }
+  return Array.from(buckets.values())
+    .sort((a, b) => a.startTick - b.startTick)
+    .map((bucket) => ({
+      startTick: bucket.startTick,
+      endTick: bucket.endTick,
+      records: bucket.records,
+      commands: bucket.commands,
+      events: bucket.events,
+      functions: bucket.functionIds.size,
+    }));
+}
+
+function sanitizeSelection(selection: Selection, indexes: TraceIndexes): Selection {
+  if (!selection) return null;
+  if (selection.kind === "record") {
+    return indexes.recordsById.has(selection.id) ? selection : null;
+  }
+  const peers = indexes.recordsByFunctionCallId.get(selection.functionCallId);
+  return peers && peers.length > 0 ? selection : null;
 }
 
 function lastWindow(range: { min: number; max: number }): { min: number; max: number } {

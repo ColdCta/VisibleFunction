@@ -18,12 +18,15 @@ export function selectViewModel(
   records: TraceRecord[],
   indexes: TraceIndexes,
   filters: FilterState,
-  bucketTicks: number
+  bucketTicks: number,
+  viewRange?: { min: number; max: number }
 ): ViewModel {
   void indexes; // indexes are used by selection/highlight, not by bucketing; kept for API symmetry.
 
   // Type + search filtering (shared with DetailPanel via filterRecords).
-  const candidates = filterRecords(records, filters);
+  const searchActive = filters.search.trim().length > 0;
+  const scopedRecords = searchActive ? records : recordsForView(records, viewRange, bucketTicks);
+  const candidates = filterRecords(scopedRecords, filters);
 
   // Bands are always derived so the TICK COMMANDS lane can render. When hideHighFreq is on, matched
   // records are removed from the other lanes (TICK/EVENT/FUNCTION/COMMANDS) but the bands stay
@@ -70,8 +73,44 @@ export function selectViewModel(
     totalCommands,
     totalEvents,
     totalFunctions: functionCalls.size,
-    searchActive: filters.search.trim().length > 0,
+    searchActive,
   };
+}
+
+function recordsForView(
+  records: TraceRecord[],
+  viewRange: { min: number; max: number } | undefined,
+  bucketTicks: number
+): TraceRecord[] {
+  if (!viewRange || (!viewRange.min && !viewRange.max) || records.length === 0) return records;
+  const overscanTicks = Math.max(bucketTicks * 12, 40);
+  const min = viewRange.min - overscanTicks;
+  const max = viewRange.max + overscanTicks;
+  const start = lowerBoundRecordTick(records, min);
+  const end = upperBoundRecordTick(records, max);
+  return records.slice(start, end);
+}
+
+function lowerBoundRecordTick(records: TraceRecord[], target: number): number {
+  let lo = 0;
+  let hi = records.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (recordTick(records[mid]) < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function upperBoundRecordTick(records: TraceRecord[], target: number): number {
+  let lo = 0;
+  let hi = records.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (recordTick(records[mid]) <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 // Pure filtering (type + search only — no tick-filter, no bucketing). Shared by the timeline view

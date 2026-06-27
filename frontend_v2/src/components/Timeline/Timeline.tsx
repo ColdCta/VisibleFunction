@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTraceStore } from "../../store/traceStore";
+import type { TraceTickSummary } from "../../store/traceStore";
 import { selectViewModel } from "../../store/selectors";
 import { BUCKET_SIZES, formatBucketHeader } from "../../store/timelineBuckets";
 import type { TickFilterBand, TimelineBucket, TraceRecord } from "../../api/types";
@@ -9,10 +10,21 @@ import { effectiveAction } from "../../store/recordNorm";
 import { FunctionCard } from "./FunctionCard";
 
 const COLUMN_WIDTH = 220;
+const EMPTY_VIEW_MODEL = {
+  filtered: [],
+  buckets: [],
+  tickFilterBands: [],
+  totalCommands: 0,
+  totalEvents: 0,
+  totalFunctions: 0,
+  searchActive: false,
+};
 
 export function Timeline() {
   const records = useTraceStore((s) => s.records);
   const indexes = useTraceStore((s) => s.indexes);
+  const stats = useTraceStore((s) => s.stats);
+  const liveWarmupState = useTraceStore((s) => s.liveWarmupState);
   const filters = useTraceStore((s) => s.filters);
   const bucketTicks = useTraceStore((s) => s.bucketTicks);
   const setBucket = useTraceStore((s) => s.setBucket);
@@ -30,10 +42,11 @@ export function Timeline() {
   // Mirrors the scroller's horizontal scroll position via rAF-throttled listener so the minimap's
   // viewport rectangle tracks the native scrollbar (the minimap is read-only — no drag/paging).
   const [scrollState, setScrollState] = useState({ scrollLeft: 0, scrollWidth: 1, clientWidth: 1 });
+  const warming = liveWarmupState === "warming";
 
   const vm = useMemo(
-    () => selectViewModel(records, indexes, filters, bucketTicks),
-    [records, indexes, filters, bucketTicks]
+    () => warming ? EMPTY_VIEW_MODEL : selectViewModel(records, indexes, filters, bucketTicks, viewRange),
+    [records, indexes, filters, bucketTicks, viewRange, warming]
   );
 
   const visibleBuckets = useMemo(() => {
@@ -160,7 +173,9 @@ export function Timeline() {
       </div>
 
       <div className="timeline__grid" ref={scrollerRef}>
-        {empty ? (
+        {warming ? (
+          <WarmupState recordCount={stats.recordCount} />
+        ) : empty ? (
           <EmptyState connection={connection} />
         ) : (
           <div className="buckets" style={{ width: totalWidth, minWidth: totalWidth }}>
@@ -216,7 +231,7 @@ export function Timeline() {
       </div>
 
       <Minimap
-        buckets={vm.buckets}
+        summary={stats.tickSummary}
         scrollState={scrollState}
       />
     </main>
@@ -602,22 +617,22 @@ function LaneLabel({ icon, title, subtitle }: { icon: string; title: string; sub
 }
 
 function Minimap({
-  buckets,
+  summary,
   scrollState,
 }: {
-  buckets: TimelineBucket[];
+  summary: TraceTickSummary[];
   scrollState: { scrollLeft: number; scrollWidth: number; clientWidth: number };
 }) {
-  if (buckets.length === 0) return <div className="minimap minimap--empty" />;
-  const min = buckets[0].startTick;
-  const max = buckets[buckets.length - 1].endTick;
+  if (summary.length === 0) return <div className="minimap minimap--empty" />;
+  const min = summary[0].startTick;
+  const max = summary[summary.length - 1].endTick;
   const span = max - min || 1;
 
-  const ticks = buckets.map((b) => ({
-    h: b.records.length,
-    e: b.events.length,
-    fn: b.byFunctionCallId.size,
-    c: b.commands.length,
+  const ticks = summary.map((b) => ({
+    h: b.records,
+    e: b.events,
+    fn: b.functions,
+    c: b.commands,
     s: b.startTick,
     e2: b.endTick,
   }));
@@ -677,6 +692,17 @@ function EmptyState({ connection }: { connection: string }) {
     <div className="timeline__empty">
       <div style={{ fontSize: 14, marginBottom: 6 }}>No trace records yet.</div>
       <div className="muted" style={{ fontSize: 12 }}>Start a recording or run datapack commands in-game.</div>
+    </div>
+  );
+}
+
+function WarmupState({ recordCount }: { recordCount: number }) {
+  return (
+    <div className="timeline__empty">
+      <div style={{ fontSize: 14, marginBottom: 6 }}>Preparing live view...</div>
+      <div className="muted" style={{ fontSize: 12 }}>
+        Rebuilding the visible timeline window from {recordCount.toLocaleString()} retained records.
+      </div>
     </div>
   );
 }
