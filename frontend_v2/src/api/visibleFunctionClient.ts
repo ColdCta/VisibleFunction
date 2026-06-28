@@ -1,5 +1,6 @@
 import type {
   DatapackAnalysisResponse,
+  DatapackTriggerResponse,
   GroupedResponse,
   HealthResponse,
   RecordingPayload,
@@ -77,6 +78,10 @@ export class VisibleFunctionClient {
 
   datapackAnalysis(): Promise<DatapackAnalysisResponse> {
     return this.get<DatapackAnalysisResponse>("/api/v1/datapack-analysis");
+  }
+
+  datapackTriggers(): Promise<DatapackTriggerResponse> {
+    return this.get<DatapackTriggerResponse>("/api/v1/datapack-triggers");
   }
 
   // Opens the SSE stream. Returns a close function. The backend emits `hello`/`record`/`records`

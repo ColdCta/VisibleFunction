@@ -1,11 +1,15 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
 import type {
+  AdvancementTriggerSource,
   AnalyzedFunction,
   DatapackAnalysisResponse,
   DatapackCommand,
   DatapackGraphNode,
+  DatapackTriggerEdge,
+  DatapackTriggerResponse,
   DatapackVariable,
+  EnchantmentTriggerSource,
   FunctionEdge,
   SelectorRef,
 } from "../api/types";
@@ -26,7 +30,27 @@ const LARGE_GRAPH_EDGE_LIMIT = 180;
 type ScopeFilter = "all" | "tickChain" | "tickRoots";
 type EdgeLabelMode = "auto" | "all" | "off";
 type DatapackSubView = "graph" | "variables";
-type GraphSelection = { kind: "function"; id: string } | { kind: "edge"; id: string } | null;
+type GraphSelection =
+  | { kind: "function"; id: string }
+  | { kind: "trigger"; id: string }
+  | { kind: "edge"; id: string }
+  | null;
+
+type TriggerNodeData = {
+  id: string;
+  sourceType: "advancement" | "enchantment";
+  sourceId: string;
+  pack: string;
+  triggerCount: number;
+  edges: DatapackTriggerEdge[];
+  advancement: AdvancementTriggerSource | null;
+  enchantment: EnchantmentTriggerSource | null;
+};
+
+type GraphWarning = {
+  source: "analysis" | "triggers";
+  message: string;
+};
 
 type GraphNode = {
   id: string;
@@ -45,6 +69,7 @@ type GraphNode = {
   subtitle: string;
   missing: boolean;
   tag: boolean;
+  kind: "function" | "missing" | "tag" | "advancement" | "enchantment";
 };
 
 type GraphEdge = FunctionEdge & {
@@ -63,6 +88,8 @@ type GraphEdge = FunctionEdge & {
   labelWidth: number;
   hasVariables: boolean;
   curveOffset: number;
+  family: "function" | "trigger";
+  triggerDetails: DatapackTriggerEdge[];
 };
 
 type SourceGraphEdge = FunctionEdge & {
@@ -74,6 +101,8 @@ type SourceGraphEdge = FunctionEdge & {
   variablesRead: string[];
   variablesWritten: string[];
   executeSummaries: string[];
+  family: "function" | "trigger";
+  triggerDetails: DatapackTriggerEdge[];
 };
 
 type GraphModel = {
@@ -81,6 +110,7 @@ type GraphModel = {
   edges: GraphEdge[];
   functionMap: Map<string, AnalyzedFunction>;
   variableMap: Map<string, DatapackVariable>;
+  triggerMap: Map<string, TriggerNodeData>;
   packs: string[];
   namespaces: string[];
   edgeKinds: string[];
@@ -107,14 +137,18 @@ export function DatapackGraphView() {
   const client = useTraceStore((s) => s.client);
   const baseUrl = useTraceStore((s) => s.baseUrl);
   const [analysis, setAnalysis] = useState<DatapackAnalysisResponse | null>(null);
+  const [triggers, setTriggers] = useState<DatapackTriggerResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
   const [activeDatapackView, setActiveDatapackView] = useState<DatapackSubView>("graph");
   const [scope, setScope] = useState<ScopeFilter>("all");
   const [groupFilter, setGroupFilter] = useState("all");
   const [edgeKind, setEdgeKind] = useState("all");
   const [edgeLabelMode, setEdgeLabelMode] = useState<EdgeLabelMode>("auto");
   const [highlightVariables, setHighlightVariables] = useState(true);
+  const [showAdvancements, setShowAdvancements] = useState(false);
+  const [showEnchantments, setShowEnchantments] = useState(false);
   const [selectedVariableKey, setSelectedVariableKey] = useState<string | null>(null);
   const [variableKindFilter, setVariableKindFilter] = useState("all");
   const [variableAccessFilter, setVariableAccessFilter] = useState<VariableAccessFilter>("all");
@@ -136,18 +170,28 @@ export function DatapackGraphView() {
     const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
+    setTriggerError(null);
     try {
-      const next = await client.datapackAnalysis();
+      const [analysisResult, triggerResult] = await Promise.allSettled([
+        client.datapackAnalysis(),
+        client.datapackTriggers(),
+      ]);
       if (seq !== requestSeq.current) return;
-      setAnalysis(next);
+      if (analysisResult.status === "rejected") {
+        setError(analysisResult.reason instanceof Error ? analysisResult.reason.message : String(analysisResult.reason));
+      } else {
+        setAnalysis(analysisResult.value);
+      }
+      if (triggerResult.status === "rejected") {
+        setTriggerError(triggerResult.reason instanceof Error ? triggerResult.reason.message : String(triggerResult.reason));
+      } else {
+        setTriggers(triggerResult.value);
+      }
       setSelected(null);
       setSelectedVariableKey(null);
       setLargeGraphAccepted(false);
       setLargeGraphPromptDismissed(false);
       setWarningsExpanded(false);
-    } catch (err) {
-      if (seq !== requestSeq.current) return;
-      setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
@@ -158,8 +202,8 @@ export function DatapackGraphView() {
   }, [loadAnalysis]);
 
   const preview = useMemo(
-    () => buildGraphPreview(analysis, scope, groupFilter, edgeKind, deferredQuery),
-    [analysis, deferredQuery, edgeKind, groupFilter, scope]
+    () => buildGraphPreview(analysis, triggers, showAdvancements, showEnchantments, scope, groupFilter, edgeKind, deferredQuery),
+    [analysis, deferredQuery, edgeKind, groupFilter, scope, showAdvancements, showEnchantments, triggers]
   );
   const largeGraphBlocked = Boolean(analysis) &&
     activeDatapackView === "graph" &&
@@ -171,8 +215,8 @@ export function DatapackGraphView() {
       ? emptyGraphModel(analysis, preview)
       : largeGraphBlocked
       ? emptyGraphModel(analysis, preview)
-      : buildGraphModel(analysis, scope, groupFilter, edgeKind, deferredQuery),
-    [activeDatapackView, analysis, deferredQuery, edgeKind, groupFilter, largeGraphBlocked, preview, scope]
+      : buildGraphModel(analysis, triggers, showAdvancements, showEnchantments, scope, groupFilter, edgeKind, deferredQuery),
+    [activeDatapackView, analysis, deferredQuery, edgeKind, groupFilter, largeGraphBlocked, preview, scope, showAdvancements, showEnchantments, triggers]
   );
   const variableKinds = useMemo(
     () => Array.from(new Set((analysis?.variables ?? []).map((variable) => variable.kind).filter(Boolean))).sort(),
@@ -182,7 +226,16 @@ export function DatapackGraphView() {
 
   const selectedFunction =
     selected?.kind === "function" ? graph.functionMap.get(selected.id) ?? null : null;
+  const selectedTrigger =
+    selected?.kind === "trigger" ? graph.triggerMap.get(selected.id) ?? null : null;
   const selectedEdge = selected?.kind === "edge" ? graph.edges.find((edge) => edge.id === selected.id) ?? null : null;
+  const warnings = useMemo<GraphWarning[]>(
+    () => [
+      ...(analysis?.analysis.warnings ?? []).map((message) => ({ source: "analysis" as const, message })),
+      ...(triggers?.analysis.warnings ?? []).map((message) => ({ source: "triggers" as const, message })),
+    ],
+    [analysis, triggers]
+  );
   const queryActive = deferredQuery.trim().length > 0;
   const orderedEdges = useMemo(
     () => graph.edges.slice().sort((a, b) => edgeRenderRank(a, selected, hoveredEdgeId) - edgeRenderRank(b, selected, hoveredEdgeId)),
@@ -283,8 +336,9 @@ export function DatapackGraphView() {
         <div className="datapack__stats">
           <Stat label="Functions" value={analysis?.analysis.functionCount ?? graph.nodes.filter((node) => node.fn).length} />
           <Stat label="Edges" value={analysis?.analysis.edgeCount ?? graph.edges.length} />
+          <Stat label="Triggers" value={triggers?.analysis.triggerCount ?? 0} />
           <Stat label="Variables" value={analysis?.analysis.variableCount ?? 0} />
-          <Stat label="Warnings" value={analysis?.analysis.warnings.length ?? 0} tone={analysis?.analysis.warnings.length ? "warn" : undefined} />
+          <Stat label="Warnings" value={warnings.length} tone={warnings.length ? "warn" : undefined} />
         </div>
         <button onClick={() => void loadAnalysis()} disabled={loading}>
           {loading ? "Loading" : "Refresh"}
@@ -365,6 +419,29 @@ export function DatapackGraphView() {
                 <strong>Highlight</strong>
               </label>
             </div>
+            <div className="datapack-control datapack-control--sources">
+              <span>Trigger Sources</span>
+              <div className="datapack-source-toggles">
+                <label className="datapack-check">
+                  <input
+                    type="checkbox"
+                    aria-label="Advancement"
+                    checked={showAdvancements}
+                    onChange={(event) => setShowAdvancements(event.currentTarget.checked)}
+                  />
+                  <strong title="Advancement">ADV</strong>
+                </label>
+                <label className="datapack-check">
+                  <input
+                    type="checkbox"
+                    aria-label="Enchantment"
+                    checked={showEnchantments}
+                    onChange={(event) => setShowEnchantments(event.currentTarget.checked)}
+                  />
+                  <strong title="Enchantment">ENCH</strong>
+                </label>
+              </div>
+            </div>
             <label className="datapack-control datapack-control--zoom">
               <span>Zoom</span>
               <input
@@ -429,6 +506,12 @@ export function DatapackGraphView() {
         <div className="datapack__notice datapack__notice--error">
           <strong>Datapack analysis failed</strong>
           <span>{error}</span>
+        </div>
+      )}
+      {triggerError && (
+        <div className="datapack__notice datapack__notice--warn">
+          <strong>Trigger sources unavailable</strong>
+          <span>{triggerError}. The function graph remains available.</span>
         </div>
       )}
 
@@ -502,6 +585,7 @@ export function DatapackGraphView() {
                       className={[
                         "datapack-edge",
                         `datapack-edge--${edge.kind}`,
+                        `datapack-edge--${edge.family}`,
                         selectedEdgeNode ? "is-selected" : "",
                         hoveredEdge ? "is-hovered" : "",
                         highlightVariables && edge.hasVariables ? "has-variables" : "",
@@ -548,7 +632,9 @@ export function DatapackGraphView() {
                   );
                 })}
                 {graph.nodes.map((node) => {
-                  const selectedNode = selected?.kind === "function" && selected.id === node.id;
+                  const selectedNode =
+                    (selected?.kind === "function" || selected?.kind === "trigger") &&
+                    selected.id === node.id;
                   const hovered = hoveredId === node.id;
                   return (
                     <g
@@ -559,6 +645,8 @@ export function DatapackGraphView() {
                         node.fn?.tickFunction && !node.fn.tickRoot ? "datapack-node--tick-chain" : "",
                         node.missing ? "datapack-node--missing" : "",
                         node.tag ? "datapack-node--tag" : "",
+                        node.kind === "advancement" ? "datapack-node--advancement" : "",
+                        node.kind === "enchantment" ? "datapack-node--enchantment" : "",
                         selectedNode ? "is-selected" : "",
                         hovered ? "is-hovered" : "",
                       ].filter(Boolean).join(" ")}
@@ -568,7 +656,10 @@ export function DatapackGraphView() {
                       onMouseLeave={() => setHoveredId((current) => (current === node.id ? null : current))}
                       onClick={(event) => {
                         event.stopPropagation();
-                        setSelected({ kind: "function", id: node.id });
+                        setSelected({
+                          kind: node.kind === "advancement" || node.kind === "enchantment" ? "trigger" : "function",
+                          id: node.id,
+                        });
                       }}
                     >
                       <title>{nodeTitle(node)}</title>
@@ -594,9 +685,12 @@ export function DatapackGraphView() {
 
         <DatapackInspector
           analysis={analysis}
+          triggers={triggers}
           graph={graph}
           selectedFunction={selectedFunction}
+          selectedTrigger={selectedTrigger}
           selectedEdge={selectedEdge}
+          warnings={warnings}
           warningsExpanded={warningsExpanded}
           onToggleWarnings={() => setWarningsExpanded((expanded) => !expanded)}
           onVariableSelect={(key) => {
@@ -614,22 +708,52 @@ export function DatapackGraphView() {
 
 function DatapackInspector({
   analysis,
+  triggers,
   graph,
   selectedFunction,
+  selectedTrigger,
   selectedEdge,
+  warnings,
   warningsExpanded,
   onToggleWarnings,
   onVariableSelect,
 }: {
   analysis: DatapackAnalysisResponse | null;
+  triggers: DatapackTriggerResponse | null;
   graph: GraphModel;
   selectedFunction: AnalyzedFunction | null;
+  selectedTrigger: TriggerNodeData | null;
   selectedEdge: GraphEdge | null;
+  warnings: GraphWarning[];
   warningsExpanded: boolean;
   onToggleWarnings: () => void;
   onVariableSelect: (key: string) => void;
 }) {
   if (selectedEdge) {
+    if (selectedEdge.family === "trigger") {
+      const detail = selectedEdge.triggerDetails[0];
+      return (
+        <aside className="datapack-inspector">
+          <div className="datapack-inspector__title">Selected Trigger Edge</div>
+          <KeyValues
+            rows={[
+              ["From", triggerSourceLabel(selectedEdge.from)],
+              ["To", selectedEdge.to],
+              ["Kind", selectedEdge.kind],
+              ["References", selectedEdge.triggerDetails.length.toLocaleString()],
+              ["Pack", detail?.pack || "-"],
+              ["Effect", detail?.effectComponent || "none"],
+              ["Affected", detail?.affected || "none"],
+              ["Enchanted", detail?.enchanted || "none"],
+            ]}
+          />
+          <ListSection title="Conditions" items={selectedEdge.conditionSummaries.filter(isMeaningfulSummary)} />
+          <ListSection title="JSON Paths" items={uniqueStrings(selectedEdge.triggerDetails.map((edge) => edge.jsonPath))} />
+          <ListSection title="Trigger IDs" items={selectedEdge.triggerDetails.map((edge) => edge.id)} />
+          <Warnings warnings={warnings} expanded={warningsExpanded} onToggle={onToggleWarnings} />
+        </aside>
+      );
+    }
     return (
       <aside className="datapack-inspector">
         <div className="datapack-inspector__title">Selected Edge</div>
@@ -649,7 +773,47 @@ function DatapackInspector({
         <VariableChipSection title="Reads" items={selectedEdge.variablesRead} onSelect={onVariableSelect} />
         <VariableChipSection title="Writes" items={selectedEdge.variablesWritten} onSelect={onVariableSelect} />
         <ListSection title="Sample Commands" items={selectedEdge.sampleCommands} />
-        <Warnings analysis={analysis} expanded={warningsExpanded} onToggle={onToggleWarnings} />
+        <Warnings warnings={warnings} expanded={warningsExpanded} onToggle={onToggleWarnings} />
+      </aside>
+    );
+  }
+
+  if (selectedTrigger) {
+    return (
+      <aside className="datapack-inspector">
+        <div className="datapack-inspector__title">
+          Selected {selectedTrigger.sourceType === "advancement" ? "Advancement" : "Enchantment"}
+        </div>
+        <KeyValues
+          rows={[
+            ["ID", selectedTrigger.sourceId],
+            ["Pack", selectedTrigger.pack || "-"],
+            ["References", selectedTrigger.triggerCount.toLocaleString()],
+            ["Functions", uniqueStrings(selectedTrigger.edges.map((edge) => edge.function)).length.toLocaleString()],
+            ...(selectedTrigger.advancement
+              ? [
+                  ["Parent", selectedTrigger.advancement.parent || "none"],
+                  ["Reward Function", selectedTrigger.advancement.function || "none"],
+                ] as [string, string][]
+              : [
+                  ["Supported Items", selectedTrigger.enchantment?.supportedItems || "-"],
+                  ["Primary Items", selectedTrigger.enchantment?.primaryItems || "-"],
+                  ["Slots", selectedTrigger.enchantment?.slots.join(", ") || "-"],
+                ] as [string, string][]),
+          ]}
+        />
+        {selectedTrigger.advancement && (
+          <ListSection
+            title="Criteria"
+            items={selectedTrigger.advancement.criteria.map((criterion) => `${criterion.name}: ${criterion.trigger}`)}
+          />
+        )}
+        {selectedTrigger.enchantment && (
+          <ListSection title="Functions" items={selectedTrigger.enchantment.functions} />
+        )}
+        <ListSection title="Effects" items={uniqueStrings(selectedTrigger.edges.map((edge) => edge.effectComponent)).filter(isMeaningfulSummary)} />
+        <ListSection title="Trigger IDs" items={selectedTrigger.edges.map((edge) => edge.id)} />
+        <Warnings warnings={warnings} expanded={warningsExpanded} onToggle={onToggleWarnings} />
       </aside>
     );
   }
@@ -673,6 +837,12 @@ function DatapackInspector({
         />
         <ListSection title="Calls" items={selectedFunction.calls} />
         <ListSection title="Called By" items={selectedFunction.calledBy} />
+        <ListSection
+          title="Triggered By"
+          items={uniqueStrings((triggers?.triggers ?? [])
+            .filter((edge) => edge.function === selectedFunction.id)
+            .map((edge) => `${edge.sourceType}: ${edge.sourceId}`))}
+        />
         <div className="datapack-inspector__title">Variables</div>
         <div className="datapack-inspector__list">
           {variables.length === 0 ? (
@@ -687,7 +857,7 @@ function DatapackInspector({
           )}
           {variables.length > 32 && <div className="datapack-inspector__more">+{variables.length - 32} more</div>}
         </div>
-        <Warnings analysis={analysis} expanded={warningsExpanded} onToggle={onToggleWarnings} />
+        <Warnings warnings={warnings} expanded={warningsExpanded} onToggle={onToggleWarnings} />
       </aside>
     );
   }
@@ -707,9 +877,11 @@ function DatapackInspector({
         <span><i className="datapack-legend__dot datapack-legend__dot--root" />Tick root</span>
         <span><i className="datapack-legend__dot datapack-legend__dot--chain" />Tick chain</span>
         <span><i className="datapack-legend__dot" />Function</span>
+        <span><i className="datapack-legend__dot datapack-legend__dot--advancement" />Advancement</span>
+        <span><i className="datapack-legend__dot datapack-legend__dot--enchantment" />Enchantment</span>
         <span><i className="datapack-legend__dot datapack-legend__dot--missing" />Missing/tag target</span>
       </div>
-      <Warnings analysis={analysis} expanded={warningsExpanded} onToggle={onToggleWarnings} />
+      <Warnings warnings={warnings} expanded={warningsExpanded} onToggle={onToggleWarnings} />
     </aside>
   );
 }
@@ -746,15 +918,14 @@ function LargeGraphPrompt({
 }
 
 function Warnings({
-  analysis,
+  warnings,
   expanded,
   onToggle,
 }: {
-  analysis: DatapackAnalysisResponse | null;
+  warnings: GraphWarning[];
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const warnings = analysis?.analysis.warnings ?? [];
   if (warnings.length === 0) return null;
   return (
     <section className="datapack-warnings">
@@ -765,8 +936,10 @@ function Warnings({
       </button>
       {expanded && (
         <div className="datapack-inspector__warnings" role="log" aria-label="Datapack analysis warnings">
-        {warnings.slice(0, 8).map((warning) => (
-            <div key={warning}><span>WARN</span><code>{warning}</code></div>
+        {warnings.slice(0, 8).map((warning, index) => (
+            <div key={`${warning.source}:${warning.message}:${index}`}>
+              <span>WARN/{warning.source}</span><code>{warning.message}</code>
+            </div>
         ))}
           {warnings.length > 8 && <div><span>&gt;</span><code>+{warnings.length - 8} more warnings</code></div>}
       </div>
@@ -841,6 +1014,7 @@ function emptyGraphModel(analysis: DatapackAnalysisResponse | null, preview: Gra
     edges: [],
     functionMap: new Map(analysis?.functions.map((fn) => [fn.id, fn]) ?? []),
     variableMap: new Map(analysis?.variables.map((variable) => [variable.key, variable]) ?? []),
+    triggerMap: new Map(),
     packs: preview.packs,
     namespaces: preview.namespaces,
     edgeKinds: preview.edgeKinds,
@@ -851,6 +1025,9 @@ function emptyGraphModel(analysis: DatapackAnalysisResponse | null, preview: Gra
 
 function buildGraphPreview(
   analysis: DatapackAnalysisResponse | null,
+  triggers: DatapackTriggerResponse | null,
+  showAdvancements: boolean,
+  showEnchantments: boolean,
   scope: ScopeFilter,
   groupFilter: string,
   edgeKind: string,
@@ -861,9 +1038,16 @@ function buildGraphPreview(
   }
   const normalizedQuery = query.trim().toLowerCase();
   const functionMap = new Map(analysis.functions.map((fn) => [fn.id, fn]));
-  const packs = Array.from(new Set(analysis.functions.map((fn) => fn.pack).filter(Boolean))).sort();
-  const namespaces = Array.from(new Set(analysis.functions.map((fn) => namespaceOf(fn.id)).filter(Boolean))).sort();
-  const sourceEdges = graphSourceEdges(analysis);
+  const sourceEdges = graphSourceEdges(analysis, triggers, showAdvancements, showEnchantments);
+  const triggerMap = buildTriggerNodeMap(triggers, sourceEdges);
+  const packs = Array.from(new Set([
+    ...analysis.functions.map((fn) => fn.pack),
+    ...Array.from(triggerMap.values(), (trigger) => trigger.pack),
+  ].filter(Boolean))).sort();
+  const namespaces = Array.from(new Set([
+    ...analysis.functions.map((fn) => namespaceOf(fn.id)),
+    ...Array.from(triggerMap.values(), (trigger) => namespaceOf(trigger.sourceId)),
+  ].filter(Boolean))).sort();
   const edgeKinds = Array.from(new Set(sourceEdges.map((edge) => edge.kind).filter(Boolean))).sort();
   const allowedFunctions = analysis.functions.filter((fn) => {
     if (scope === "tickChain" && !fn.tickFunction) return false;
@@ -888,7 +1072,7 @@ function buildGraphPreview(
       }
     }
     for (const edge of sourceEdges) {
-      if (allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery)) {
+      if (edge.family === "function" && allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery)) {
         visibleIds.add(edge.from);
         visibleIds.add(edge.to);
       }
@@ -898,16 +1082,7 @@ function buildGraphPreview(
   let edgeCount = 0;
   for (const edge of sourceEdges) {
     if (edgeKind !== "all" && edge.kind !== edgeKind) continue;
-    const targetKnown = functionMap.has(edge.to);
-    const sourceVisible = visibleIds.has(edge.from) || (normalizedQuery.length > 0 && allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery));
-    const targetVisible = visibleIds.has(edge.to) || (normalizedQuery.length > 0 && allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery));
-    const missingOrTagTarget = !targetKnown || edge.to.startsWith("#");
-    const queryMatchesEdge = !normalizedQuery ||
-      matchesEdgeQuery(edge, normalizedQuery) ||
-      visibleIds.has(edge.from) ||
-      visibleIds.has(edge.to);
-    if (!queryMatchesEdge) continue;
-    if (!sourceVisible || (!targetVisible && !missingOrTagTarget)) continue;
+    if (!sourceEdgeVisible(edge, visibleIds, allowedIds, functionMap, triggerMap, scope, groupFilter, normalizedQuery)) continue;
     edgeCount++;
     visibleIds.add(edge.from);
     visibleIds.add(edge.to);
@@ -919,12 +1094,15 @@ function buildGraphPreview(
     packs,
     namespaces,
     edgeKinds,
-    key: `${scope}|${groupFilter}|${edgeKind}|${normalizedQuery}|${visibleIds.size}|${edgeCount}`,
+    key: `${scope}|${groupFilter}|${edgeKind}|${showAdvancements}|${showEnchantments}|${normalizedQuery}|${visibleIds.size}|${edgeCount}`,
   };
 }
 
 function buildGraphModel(
   analysis: DatapackAnalysisResponse | null,
+  triggers: DatapackTriggerResponse | null,
+  showAdvancements: boolean,
+  showEnchantments: boolean,
   scope: ScopeFilter,
   groupFilter: string,
   edgeKind: string,
@@ -937,6 +1115,7 @@ function buildGraphModel(
       edges: [],
       functionMap: new Map(),
       variableMap: new Map(),
+      triggerMap: new Map(),
       packs: [],
       namespaces: [],
       edgeKinds: [],
@@ -949,9 +1128,16 @@ function buildGraphModel(
   const functionMap = new Map(analysis.functions.map((fn) => [fn.id, fn]));
   const variableMap = new Map(analysis.variables.map((variable) => [variable.key, variable]));
   const graphNodeMap = new Map((analysis.graph?.nodes ?? []).map((node) => [node.id, node]));
-  const packs = Array.from(new Set(analysis.functions.map((fn) => fn.pack).filter(Boolean))).sort();
-  const namespaces = Array.from(new Set(analysis.functions.map((fn) => namespaceOf(fn.id)).filter(Boolean))).sort();
-  const sourceEdges = graphSourceEdges(analysis);
+  const sourceEdges = graphSourceEdges(analysis, triggers, showAdvancements, showEnchantments);
+  const triggerMap = buildTriggerNodeMap(triggers, sourceEdges);
+  const packs = Array.from(new Set([
+    ...analysis.functions.map((fn) => fn.pack),
+    ...Array.from(triggerMap.values(), (trigger) => trigger.pack),
+  ].filter(Boolean))).sort();
+  const namespaces = Array.from(new Set([
+    ...analysis.functions.map((fn) => namespaceOf(fn.id)),
+    ...Array.from(triggerMap.values(), (trigger) => namespaceOf(trigger.sourceId)),
+  ].filter(Boolean))).sort();
   const edgeKinds = Array.from(new Set(sourceEdges.map((edge) => edge.kind).filter(Boolean))).sort();
 
   const allowedFunctions = analysis.functions.filter((fn) => {
@@ -976,7 +1162,7 @@ function buildGraphModel(
       }
     }
     for (const edge of sourceEdges) {
-      if (allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery)) {
+      if (edge.family === "function" && allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery)) {
         visibleIds.add(edge.from);
         visibleIds.add(edge.to);
       }
@@ -994,21 +1180,16 @@ function buildGraphModel(
   const rawEdges: SourceGraphEdge[] = [];
   sourceEdges.forEach((edge) => {
     if (edgeKind !== "all" && edge.kind !== edgeKind) return;
-    const targetKnown = functionMap.has(edge.to);
-    const sourceVisible = visibleIds.has(edge.from) || (normalizedQuery.length > 0 && allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery));
-    const targetVisible = visibleIds.has(edge.to) || (normalizedQuery.length > 0 && allowedIds.has(edge.from) && matchesEdgeQuery(edge, normalizedQuery));
-    const missingOrTagTarget = !targetKnown || edge.to.startsWith("#");
-    const queryMatchesEdge = !normalizedQuery ||
-      matchesEdgeQuery(edge, normalizedQuery) ||
-      visibleIds.has(edge.from) ||
-      visibleIds.has(edge.to);
-    if (!queryMatchesEdge) return;
-    if (!sourceVisible || (!targetVisible && !missingOrTagTarget)) return;
+    if (!sourceEdgeVisible(edge, visibleIds, allowedIds, functionMap, triggerMap, scope, groupFilter, normalizedQuery)) return;
 
     rawEdges.push(edge);
     if (!nodeSeeds.has(edge.from)) {
-      const fn = functionMap.get(edge.from);
-      nodeSeeds.set(edge.from, makeGraphNode(edge.from, fn ?? null, graphNodeMap.get(edge.from)));
+      const trigger = triggerMap.get(edge.from);
+      if (trigger) nodeSeeds.set(edge.from, makeTriggerGraphNode(trigger));
+      else {
+        const fn = functionMap.get(edge.from);
+        nodeSeeds.set(edge.from, makeGraphNode(edge.from, fn ?? null, graphNodeMap.get(edge.from)));
+      }
     }
     if (!nodeSeeds.has(edge.to)) {
       nodeSeeds.set(edge.to, makeGraphNode(edge.to, functionMap.get(edge.to) ?? null, graphNodeMap.get(edge.to)));
@@ -1060,41 +1241,180 @@ function buildGraphModel(
     edges,
     functionMap,
     variableMap,
+    triggerMap,
     packs,
     namespaces,
     edgeKinds,
     bounds,
-    key: `${scope}|${groupFilter}|${edgeKind}|${normalizedQuery}|${nodes.length}|${edges.length}`,
+    key: `${scope}|${groupFilter}|${edgeKind}|${showAdvancements}|${showEnchantments}|${normalizedQuery}|${nodes.length}|${edges.length}`,
   };
 }
 
-function graphSourceEdges(analysis: DatapackAnalysisResponse): SourceGraphEdge[] {
+function graphSourceEdges(
+  analysis: DatapackAnalysisResponse,
+  triggers: DatapackTriggerResponse | null,
+  showAdvancements: boolean,
+  showEnchantments: boolean
+): SourceGraphEdge[] {
   const detailIndex = detailEdgeIndex(analysis.edges, analysis.commands ?? []);
+  let functionEdges: SourceGraphEdge[];
   if (!analysis.graph?.edges?.length) {
-    return analysis.edges.map((edge, index) => normalizeDetailedEdge(edge, index, detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? [edge]));
+    functionEdges = analysis.edges.map((edge, index) => normalizeDetailedEdge(edge, index, detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? [edge]));
+  } else {
+    functionEdges = analysis.graph.edges.map((edge, index) => ({
+      ...normalizeDetailedEdge(
+        {
+          id: `${edge.from}->${edge.to}:${edge.kind}:${index}`,
+          from: edge.from,
+          to: edge.to,
+          kind: edge.kind,
+          viaTag: "none",
+          line: edge.lines[0] ?? 0,
+          command: edge.sampleCommands[0] ?? "",
+          rawCommand: edge.sampleCommands[0] ?? "",
+          effectiveCommand: edge.sampleCommands[0] ?? "",
+          conditionSummary: edge.conditionSummaries[0] ?? "none",
+        },
+        index,
+        detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []
+      ),
+      callCount: edge.callCount,
+      lines: uniqueNumbers([...(edge.lines ?? []), ...((detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []).map((detail) => detail.line))]),
+      conditionSummaries: uniqueStrings([...(edge.conditionSummaries ?? []), ...((detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []).map((detail) => detail.conditionSummary ?? ""))]).filter(isMeaningfulSummary),
+      sampleCommands: uniqueStrings([...(edge.sampleCommands ?? []), ...((detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []).flatMap((detail) => [detail.effectiveCommand ?? "", detail.rawCommand ?? "", detail.command ?? ""]))]).filter(Boolean),
+    }));
   }
-  return analysis.graph.edges.map((edge, index) => ({
-    ...normalizeDetailedEdge(
-      {
-        id: `${edge.from}->${edge.to}:${edge.kind}:${index}`,
-        from: edge.from,
-        to: edge.to,
-        kind: edge.kind,
+  return functionEdges.concat(triggerSourceEdges(triggers, showAdvancements, showEnchantments));
+}
+
+function triggerSourceEdges(
+  response: DatapackTriggerResponse | null,
+  showAdvancements: boolean,
+  showEnchantments: boolean
+): SourceGraphEdge[] {
+  if (!response || (!showAdvancements && !showEnchantments)) return [];
+  const groups = new Map<string, DatapackTriggerEdge[]>();
+  for (const edge of response.triggers) {
+    if (edge.sourceType === "advancement" && !showAdvancements) continue;
+    if (edge.sourceType === "enchantment" && !showEnchantments) continue;
+    const key = `${edge.sourceType}\u001f${edge.sourceId}\u001f${edge.function}\u001f${edge.kind}`;
+    const group = groups.get(key);
+    if (group) group.push(edge);
+    else groups.set(key, [edge]);
+  }
+  return Array.from(groups.values())
+    .sort((a, b) => a[0].id.localeCompare(b[0].id))
+    .map((details, index) => {
+      const first = details[0];
+      const conditions = uniqueStrings(details.map((edge) => edge.conditionSummary)).filter(isMeaningfulSummary);
+      const paths = uniqueStrings(details.map((edge) => edge.jsonPath)).filter(Boolean);
+      return {
+        id: `trigger-edge:${first.sourceType}:${first.sourceId}:${first.function}:${first.kind}:${index}`,
+        from: triggerNodeId(first.sourceType, first.sourceId),
+        to: first.function,
+        kind: first.kind,
         viaTag: "none",
-        line: edge.lines[0] ?? 0,
-        command: edge.sampleCommands[0] ?? "",
-        rawCommand: edge.sampleCommands[0] ?? "",
-        effectiveCommand: edge.sampleCommands[0] ?? "",
-        conditionSummary: edge.conditionSummaries[0] ?? "none",
-      },
-      index,
-      detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []
-    ),
-    callCount: edge.callCount,
-    lines: uniqueNumbers([...(edge.lines ?? []), ...((detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []).map((detail) => detail.line))]),
-    conditionSummaries: uniqueStrings([...(edge.conditionSummaries ?? []), ...((detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []).map((detail) => detail.conditionSummary ?? ""))]).filter(isMeaningfulSummary),
-    sampleCommands: uniqueStrings([...(edge.sampleCommands ?? []), ...((detailIndex.get(edgeGroupKey(edge.from, edge.to, edge.kind)) ?? []).flatMap((detail) => [detail.effectiveCommand ?? "", detail.rawCommand ?? "", detail.command ?? ""]))]).filter(Boolean),
-  }));
+        line: 0,
+        command: paths[0] ?? "",
+        rawCommand: paths[0] ?? "",
+        effectiveCommand: paths[0] ?? "",
+        conditionSummary: conditions[0] ?? "none",
+        callCount: details.length,
+        lines: [],
+        conditionSummaries: conditions,
+        sampleCommands: paths,
+        selectors: [],
+        variablesRead: [],
+        variablesWritten: [],
+        executeSummaries: [],
+        family: "trigger",
+        triggerDetails: details,
+      };
+    });
+}
+
+function buildTriggerNodeMap(
+  response: DatapackTriggerResponse | null,
+  edges: SourceGraphEdge[]
+): Map<string, TriggerNodeData> {
+  const map = new Map<string, TriggerNodeData>();
+  if (!response) return map;
+  const advancements = new Map(response.advancements.map((source) => [source.id, source]));
+  const enchantments = new Map(response.enchantments.map((source) => [source.id, source]));
+  for (const edge of edges) {
+    if (edge.family !== "trigger" || edge.triggerDetails.length === 0) continue;
+    const detail = edge.triggerDetails[0];
+    const id = triggerNodeId(detail.sourceType, detail.sourceId);
+    const existing = map.get(id);
+    if (existing) {
+      existing.edges.push(...edge.triggerDetails);
+      existing.triggerCount += edge.triggerDetails.length;
+      continue;
+    }
+    map.set(id, {
+      id,
+      sourceType: detail.sourceType,
+      sourceId: detail.sourceId,
+      pack: detail.pack,
+      triggerCount: edge.triggerDetails.length,
+      edges: [...edge.triggerDetails],
+      advancement: detail.sourceType === "advancement" ? advancements.get(detail.sourceId) ?? null : null,
+      enchantment: detail.sourceType === "enchantment" ? enchantments.get(detail.sourceId) ?? null : null,
+    });
+  }
+  return map;
+}
+
+function sourceEdgeVisible(
+  edge: SourceGraphEdge,
+  visibleIds: Set<string>,
+  allowedIds: Set<string>,
+  functionMap: Map<string, AnalyzedFunction>,
+  triggerMap: Map<string, TriggerNodeData>,
+  scope: ScopeFilter,
+  groupFilter: string,
+  query: string
+): boolean {
+  const queryMatchesEdge = !query ||
+    matchesEdgeQuery(edge, query) ||
+    visibleIds.has(edge.from) ||
+    visibleIds.has(edge.to);
+  if (!queryMatchesEdge) return false;
+
+  if (edge.family === "trigger") {
+    const targetKnown = functionMap.has(edge.to);
+    const targetAllowed = allowedIds.has(edge.to);
+    const trigger = triggerMap.get(edge.from);
+    const sourceAllowed =
+      scope === "all" &&
+      trigger !== undefined &&
+      matchesTriggerGroup(trigger, groupFilter);
+    return (targetAllowed || sourceAllowed || (!targetKnown && groupFilter === "all" && scope === "all")) &&
+      (!query || matchesEdgeQuery(edge, query) || visibleIds.has(edge.to));
+  }
+
+  const targetKnown = functionMap.has(edge.to);
+  const sourceVisible = visibleIds.has(edge.from) ||
+    (query.length > 0 && allowedIds.has(edge.from) && matchesEdgeQuery(edge, query));
+  const targetVisible = visibleIds.has(edge.to) ||
+    (query.length > 0 && allowedIds.has(edge.from) && matchesEdgeQuery(edge, query));
+  const missingOrTagTarget = !targetKnown || edge.to.startsWith("#");
+  return sourceVisible && (targetVisible || missingOrTagTarget);
+}
+
+function matchesTriggerGroup(trigger: TriggerNodeData, groupFilter: string): boolean {
+  if (groupFilter === "all") return true;
+  if (groupFilter.startsWith("pack:")) return trigger.pack === groupFilter.slice(5);
+  if (groupFilter.startsWith("namespace:")) return namespaceOf(trigger.sourceId) === groupFilter.slice(10);
+  return true;
+}
+
+function triggerNodeId(sourceType: "advancement" | "enchantment", sourceId: string): string {
+  return `@trigger:${sourceType}:${sourceId}`;
+}
+
+function triggerSourceLabel(id: string): string {
+  return id.replace(/^@trigger:(advancement|enchantment):/, "");
 }
 
 function normalizeDetailedEdge(edge: FunctionEdge, index: number, details: FunctionEdge[]): SourceGraphEdge {
@@ -1122,6 +1442,8 @@ function normalizeDetailedEdge(edge: FunctionEdge, index: number, details: Funct
     conditionSummaries,
     sampleCommands,
     executeSummaries,
+    family: "function",
+    triggerDetails: [],
   };
 }
 
@@ -1260,6 +1582,7 @@ function layoutForce(nodes: GraphNode[], edges: GraphEdge[]): { minX: number; mi
       velocity.x += (centerX - node.x) * 0.00045;
       velocity.y += (centerY - node.y) * 0.00045;
       if (node.fn?.tickRoot) velocity.y -= 0.16;
+      if (node.kind === "advancement" || node.kind === "enchantment") velocity.y -= 0.18;
       if (node.entrypoint === "noCaller") velocity.x -= 0.08;
       node.x = clamp(node.x + velocity.x, node.width / 2 + 120, width - node.width / 2 - 120);
       node.y = clamp(node.y + velocity.y, node.height / 2 + 110, height - node.height / 2 - 110);
@@ -1301,6 +1624,7 @@ function makeGraphNode(id: string, fn: AnalyzedFunction | null, graphNode: Datap
   const outDegree = graphNode?.outDegree ?? 0;
   const missing = !fn;
   const tag = id.startsWith("#");
+  const kind = tag ? "tag" : missing ? "missing" : "function";
   const title = truncateMiddle(id, missing ? 24 : 28);
   const subtitle = missing
     ? (tag ? "tag target" : "missing target")
@@ -1325,6 +1649,31 @@ function makeGraphNode(id: string, fn: AnalyzedFunction | null, graphNode: Datap
     subtitle: truncateMiddle(subtitle, 34),
     missing,
     tag,
+    kind,
+  };
+}
+
+function makeTriggerGraphNode(trigger: TriggerNodeData): GraphNode {
+  const title = truncateMiddle(trigger.sourceId, 28);
+  const subtitle = `${trigger.sourceType} | ${trigger.triggerCount} ref${trigger.triggerCount === 1 ? "" : "s"}`;
+  return {
+    id: trigger.id,
+    fn: null,
+    x: 0,
+    y: 0,
+    width: Math.min(238, Math.max(NODE_WIDTH, title.length * 7 + 42)),
+    height: NODE_HEIGHT,
+    degree: 0,
+    inDegree: 0,
+    outDegree: 0,
+    module: trigger.pack || `${trigger.sourceType}:${namespaceOf(trigger.sourceId)}`,
+    namespace: namespaceOf(trigger.sourceId),
+    entrypoint: trigger.sourceType,
+    title,
+    subtitle,
+    missing: false,
+    tag: false,
+    kind: trigger.sourceType,
   };
 }
 
@@ -1408,14 +1757,20 @@ function shouldShowEdgeLabel(
 }
 
 function edgeRenderRank(edge: GraphEdge, selected: GraphSelection, hoveredEdgeId: string | null): number {
-  if (selected?.kind === "edge" && selected.id === edge.id) return 3;
-  if (hoveredEdgeId === edge.id) return 2;
+  if (selected?.kind === "edge" && selected.id === edge.id) return 4;
+  if (hoveredEdgeId === edge.id) return 3;
+  if (edge.family === "trigger") return 2;
   if (edge.hasVariables) return 1;
   return 0;
 }
 
 function edgeLabel(edge: SourceGraphEdge): string {
   const condition = firstMeaningful(edge.conditionSummaries);
+  if (edge.family === "trigger") {
+    const refs = edge.triggerDetails.length > 1 ? `${edge.triggerDetails.length} refs` : "";
+    if (condition && refs) return truncateMiddle(`${condition} | ${refs}`, 34);
+    return truncateMiddle(condition || refs || edge.kind, 34);
+  }
   const execute = firstMeaningful(edge.executeSummaries);
   const called = edge.callCount > 1 ? formatCalledTimes(edge.callCount) : "";
   if (condition && called) return truncateMiddle(`${condition} | ${called}`, 34);
@@ -1427,6 +1782,19 @@ function edgeLabel(edge: SourceGraphEdge): string {
 }
 
 function edgeTooltip(edge: GraphEdge): string {
+  if (edge.family === "trigger") {
+    const detail = edge.triggerDetails[0];
+    return [
+      `${triggerSourceLabel(edge.from)} -> ${edge.to}`,
+      `${detail?.sourceType ?? "trigger"} ${edge.kind}`,
+      `${edge.triggerDetails.length} reference${edge.triggerDetails.length === 1 ? "" : "s"}`,
+      edge.conditionSummaries.length ? `conditions: ${edge.conditionSummaries.join("; ")}` : "",
+      detail?.effectComponent && detail.effectComponent !== "none" ? `effect: ${detail.effectComponent}` : "",
+      detail?.affected && detail.affected !== "none" ? `affected: ${detail.affected}` : "",
+      detail?.enchanted && detail.enchanted !== "none" ? `enchanted: ${detail.enchanted}` : "",
+      edge.triggerDetails.length ? `paths: ${edge.triggerDetails.map((item) => item.jsonPath).join(" | ")}` : "",
+    ].filter(Boolean).join("\n");
+  }
   const parts = [
     `${edge.from} -> ${edge.to}`,
     edge.kind,
@@ -1441,6 +1809,14 @@ function edgeTooltip(edge: GraphEdge): string {
 }
 
 function nodeTitle(node: GraphNode): string {
+  if (node.kind === "advancement" || node.kind === "enchantment") {
+    return [
+      triggerSourceLabel(node.id),
+      `type: ${node.kind}`,
+      node.module ? `pack: ${node.module}` : "",
+      `${node.outDegree} function reference${node.outDegree === 1 ? "" : "s"}`,
+    ].filter(Boolean).join("\n");
+  }
   return [
     node.id,
     node.module ? `module: ${node.module}` : "",
@@ -1457,6 +1833,15 @@ function matchesEdgeQuery(edge: SourceGraphEdge, query: string): boolean {
     edge.sampleCommands.some((command) => command.toLowerCase().includes(query)) ||
     edge.conditionSummaries.some((summary) => summary.toLowerCase().includes(query)) ||
     edge.executeSummaries.some((summary) => summary.toLowerCase().includes(query)) ||
+    edge.triggerDetails.some((detail) =>
+      detail.sourceType.toLowerCase().includes(query) ||
+      detail.sourceId.toLowerCase().includes(query) ||
+      detail.pack.toLowerCase().includes(query) ||
+      detail.effectComponent.toLowerCase().includes(query) ||
+      detail.jsonPath.toLowerCase().includes(query) ||
+      detail.affected.toLowerCase().includes(query) ||
+      detail.enchanted.toLowerCase().includes(query)
+    ) ||
     edge.selectors.some((selector) => formatSelector(selector).toLowerCase().includes(query)) ||
     edge.variablesRead.some((variable) => variable.toLowerCase().includes(query)) ||
     edge.variablesWritten.some((variable) => variable.toLowerCase().includes(query));

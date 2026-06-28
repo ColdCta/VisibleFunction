@@ -53,6 +53,7 @@ final class ScoreboardResultEventFormatter {
 		appendField(text, "function", commandContext.function());
 		appendField(text, "function_call_id", commandContext.functionCallIdText());
 		appendField(text, "position", commandContext.position());
+		CommandTraceFormatter.appendTriggerFields(text, commandContext.trigger(), false);
 	}
 
 	private static void appendField(StringBuilder text, String name, String value) {

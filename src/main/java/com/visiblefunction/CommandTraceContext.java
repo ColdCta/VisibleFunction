@@ -1,15 +1,18 @@
 package com.visiblefunction;
 
 import com.visiblefunction.mixin.CommandSourceStackAccessor;
+import net.minecraft.advancements.AdvancementRewards;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.execution.Frame;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.vehicle.minecart.MinecartCommandBlock;
+import net.minecraft.world.item.enchantment.effects.RunFunction;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
 
@@ -27,6 +30,7 @@ public final class CommandTraceContext {
 	private static final ThreadLocal<String> SOURCE_OVERRIDE = new ThreadLocal<>();
 	private static final ThreadLocal<Boolean> TICK_FUNCTION_DISPATCH = ThreadLocal.withInitial(() -> false);
 	private static final ThreadLocal<Deque<CommandContext>> ACTIVE_CONTEXTS = ThreadLocal.withInitial(ArrayDeque::new);
+	private static final ThreadLocal<Deque<TriggerContext>> ACTIVE_TRIGGERS = ThreadLocal.withInitial(ArrayDeque::new);
 	private static final Map<Frame, FunctionFrame> FUNCTION_FRAMES = Collections.synchronizedMap(new WeakHashMap<>());
 	private static final Map<MinecraftServer, Deque<RetainedCommandContext>> RECENT_CONTEXTS = Collections.synchronizedMap(new WeakHashMap<>());
 	private static final AtomicLong NEXT_COMMAND_ID = new AtomicLong(1);
@@ -52,7 +56,15 @@ public final class CommandTraceContext {
 	}
 
 	public static void markFunctionFrame(Frame frame, Identifier functionId) {
-		FUNCTION_FRAMES.put(frame, new FunctionFrame(functionId, NEXT_FUNCTION_CALL_ID.getAndIncrement(), isTickFunctionFrame(functionId)));
+		FUNCTION_FRAMES.put(
+			frame,
+			new FunctionFrame(
+				functionId,
+				NEXT_FUNCTION_CALL_ID.getAndIncrement(),
+				isTickFunctionFrame(functionId),
+				currentTrigger()
+			)
+		);
 	}
 
 	public static Identifier functionFor(Frame frame) {
@@ -70,14 +82,95 @@ public final class CommandTraceContext {
 		return functionFrame != null && functionFrame.tickFunction();
 	}
 
+	public static TriggerContext triggerFor(Frame frame) {
+		FunctionFrame functionFrame = FUNCTION_FRAMES.get(frame);
+		return functionFrame == null ? null : functionFrame.trigger();
+	}
+
+	public static TriggerContext enterAdvancementTrigger(AdvancementRewards rewards, ServerPlayer player) {
+		DatapackRuntimeTriggerIndex.TriggerSource source = DatapackRuntimeTriggerIndex.advancement(rewards);
+		if (source == null) {
+			return null;
+		}
+
+		TriggerContext context = new TriggerContext(
+			source.type(),
+			source.sourceId().toString(),
+			source.functionId().toString(),
+			player.getName().getString(),
+			formatEntity(player),
+			formatPosition(player.position()),
+			player.level().dimension().identifier().toString()
+		);
+		ACTIVE_TRIGGERS.get().push(context);
+		return context;
+	}
+
+	public static TriggerContext enterEnchantmentTrigger(
+		RunFunction effect,
+		ServerLevel level,
+		Entity entity,
+		Vec3 position
+	) {
+		DatapackRuntimeTriggerIndex.TriggerSource source = DatapackRuntimeTriggerIndex.enchantment(effect);
+		Identifier functionId = source == null ? effect.function() : source.functionId();
+		TriggerContext context = new TriggerContext(
+			"enchantment",
+			source == null ? "unknown" : source.sourceId().toString(),
+			functionId.toString(),
+			entity == null ? "unknown" : entity.getName().getString(),
+			entity == null ? "none" : formatEntity(entity),
+			formatPosition(position),
+			level.dimension().identifier().toString()
+		);
+		ACTIVE_TRIGGERS.get().push(context);
+		return context;
+	}
+
+	public static void exitTrigger(TriggerContext context) {
+		if (context == null) {
+			return;
+		}
+
+		Deque<TriggerContext> triggers = ACTIVE_TRIGGERS.get();
+		if (!triggers.isEmpty() && triggers.peek() == context) {
+			triggers.pop();
+		} else {
+			triggers.remove(context);
+		}
+		if (triggers.isEmpty()) {
+			ACTIVE_TRIGGERS.remove();
+		}
+	}
+
 	public static CommandContext push(String commandInput, CommandSourceStack sourceStack, Identifier functionId, long functionCallId) {
-		CommandContext context = build(commandInput, sourceStack, functionId, functionCallId, functionId != null && DatapackTickFunctionIndex.isTickFunction(functionId));
+		CommandContext context = build(
+			commandInput,
+			sourceStack,
+			functionId,
+			functionCallId,
+			functionId != null && DatapackTickFunctionIndex.isTickFunction(functionId),
+			currentTrigger()
+		);
 		ACTIVE_CONTEXTS.get().push(context);
 		return context;
 	}
 
 	public static CommandContext push(String commandInput, CommandSourceStack sourceStack, Identifier functionId, long functionCallId, boolean tickFunction) {
-		CommandContext context = build(commandInput, sourceStack, functionId, functionCallId, tickFunction);
+		CommandContext context = build(commandInput, sourceStack, functionId, functionCallId, tickFunction, currentTrigger());
+		ACTIVE_CONTEXTS.get().push(context);
+		return context;
+	}
+
+	public static CommandContext push(
+		String commandInput,
+		CommandSourceStack sourceStack,
+		Identifier functionId,
+		long functionCallId,
+		boolean tickFunction,
+		TriggerContext trigger
+	) {
+		CommandContext context = build(commandInput, sourceStack, functionId, functionCallId, tickFunction, trigger);
 		ACTIVE_CONTEXTS.get().push(context);
 		return context;
 	}
@@ -123,7 +216,14 @@ public final class CommandTraceContext {
 		}
 	}
 
-	private static CommandContext build(String commandInput, CommandSourceStack sourceStack, Identifier functionId, long functionCallId, boolean tickFunction) {
+	private static CommandContext build(
+		String commandInput,
+		CommandSourceStack sourceStack,
+		Identifier functionId,
+		long functionCallId,
+		boolean tickFunction,
+		TriggerContext trigger
+	) {
 		String source = sourceKind(sourceStack, functionId, tickFunction);
 		Entity entity = sourceStack.getEntity();
 		String rawCommand = CommandText.normalize(commandInput);
@@ -140,6 +240,7 @@ public final class CommandTraceContext {
 			formatRotation(sourceStack.getRotation()),
 			sourceStack.getTextName().isBlank() ? "unknown" : sourceStack.getTextName(),
 			entity == null ? "none" : formatEntity(entity),
+			trigger,
 			sourceStack.getServer()
 		);
 	}
@@ -164,6 +265,16 @@ public final class CommandTraceContext {
 		}
 
 		return DatapackTickFunctionIndex.isTickFunction(functionId);
+	}
+
+	private static TriggerContext currentTrigger() {
+		Deque<TriggerContext> triggers = ACTIVE_TRIGGERS.get();
+		if (!triggers.isEmpty()) {
+			return triggers.peek();
+		}
+
+		Deque<CommandContext> contexts = ACTIVE_CONTEXTS.get();
+		return contexts.isEmpty() ? null : contexts.peek().trigger();
 	}
 
 	private static String sourceKind(CommandSourceStack sourceStack, Identifier functionId, boolean tickFunction) {
@@ -220,6 +331,7 @@ public final class CommandTraceContext {
 		String rotation,
 		String executorName,
 		String executorEntity,
+		TriggerContext trigger,
 		MinecraftServer server
 	) {
 		public String function() {
@@ -235,7 +347,18 @@ public final class CommandTraceContext {
 		}
 	}
 
-	private record FunctionFrame(Identifier functionId, long callId, boolean tickFunction) {
+	public record TriggerContext(
+		String type,
+		String sourceId,
+		String function,
+		String actorName,
+		String actorEntity,
+		String position,
+		String dimension
+	) {
+	}
+
+	private record FunctionFrame(Identifier functionId, long callId, boolean tickFunction, TriggerContext trigger) {
 	}
 
 	private static final class RetainedCommandContext {

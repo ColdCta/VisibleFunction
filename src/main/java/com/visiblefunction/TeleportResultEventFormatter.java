@@ -78,6 +78,7 @@ public final class TeleportResultEventFormatter {
 		appendField(text, "function", commandContext.function());
 		appendField(text, "function_call_id", commandContext.functionCallIdText());
 		appendField(text, "position", commandContext.position());
+		CommandTraceFormatter.appendTriggerFields(text, commandContext.trigger(), false);
 	}
 
 	public static String formatPosition(double x, double y, double z) {

@@ -113,6 +113,7 @@ final class EntityPlainTextFormatter {
 		appendField(text, "function", commandContext.function());
 		appendField(text, "function_call_id", commandContext.functionCallIdText());
 		appendField(text, "position", commandContext.position());
+		CommandTraceFormatter.appendTriggerFields(text, commandContext.trigger(), false);
 	}
 
 	private static String formatPosition(Entity entity) {

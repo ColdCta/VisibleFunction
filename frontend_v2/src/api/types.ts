@@ -19,6 +19,9 @@ export type TraceRecord = {
     source: string;
     function: string;
     functionCallId: string;
+    triggerType?: string;
+    triggerId?: string;
+    triggerFunction?: string;
   };
   basicFields: Record<string, string>;
   detailedFields: Record<string, string>;
@@ -98,6 +101,71 @@ export type RecordingPayload = {
 
 export type RecordingsList = {
   recordings: RecordingMetadata[];
+};
+
+export type DatapackTriggerResponse = {
+  analysis: {
+    generatedAtMillis: number;
+    advancementResourceCount: number;
+    enchantmentResourceCount: number;
+    advancementSourceCount: number;
+    enchantmentSourceCount: number;
+    advancementTriggerCount: number;
+    enchantmentTriggerCount: number;
+    triggerCount: number;
+    functionCount: number;
+    warnings: string[];
+  };
+  advancements: AdvancementTriggerSource[];
+  enchantments: EnchantmentTriggerSource[];
+  triggers: DatapackTriggerEdge[];
+  functions: TriggeredFunction[];
+};
+
+export type AdvancementTriggerSource = {
+  id: string;
+  pack: string;
+  parent: string;
+  function: string;
+  triggerId: string;
+  criteria: Array<{ name: string; trigger: string }>;
+};
+
+export type EnchantmentTriggerSource = {
+  id: string;
+  pack: string;
+  supportedItems: string;
+  primaryItems: string;
+  slots: string[];
+  functions: string[];
+  triggerIds: string[];
+  triggerCount: number;
+};
+
+export type DatapackTriggerEdge = {
+  id: string;
+  sourceType: "advancement" | "enchantment";
+  sourceId: string;
+  kind: "reward" | "run_function";
+  function: string;
+  pack: string;
+  effectComponent: string;
+  jsonPath: string;
+  conditionSummary: string;
+  affected: string;
+  enchanted: string;
+  functionExists: boolean;
+  tickFunction: boolean;
+};
+
+export type TriggeredFunction = {
+  id: string;
+  functionExists: boolean;
+  tickFunction: boolean;
+  triggerCount: number;
+  triggerIds: string[];
+  advancements: string[];
+  enchantments: string[];
 };
 
 export type DatapackAnalysisResponse = {

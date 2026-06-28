@@ -3,7 +3,13 @@ import { useTraceStore } from "../store/traceStore";
 import { selectSelectedRecord, filterRecords } from "../store/selectors";
 import type { TraceRecord } from "../api/types";
 import { recordTick } from "../store/traceTime";
-import { effectiveAction, recordResult, recordDuration } from "../store/recordNorm";
+import {
+  effectiveAction,
+  recordDuration,
+  recordResult,
+  recordTriggerSource,
+  triggerBadge,
+} from "../store/recordNorm";
 
 export function DetailPanel() {
   const selection = useTraceStore((s) => s.selection);
@@ -16,6 +22,7 @@ export function DetailPanel() {
   const range = useTraceStore((s) => s.range);
 
   const { record, related } = useMemo(() => selectSelectedRecord(selection, indexes), [selection, indexes]);
+  const trigger = record ? recordTriggerSource(record) : null;
 
   // Prev/Next navigate within the current FILTERED result set (docs :598). Use a Map<id,index>
   // so navigation is O(1) instead of indexOf's O(n) on large datasets.
@@ -82,6 +89,21 @@ export function DetailPanel() {
           )}
           <KV k="Result" v={resultDisplay(record)} />
           <KV k="Duration" v={durationDisplay(record)} />
+
+          {trigger && (
+            <div className="detail__section detail__trigger">
+              <div className="detail__section-title">
+                Trigger Source
+                <span className="trigger-badge">{triggerBadge(trigger)}</span>
+              </div>
+              <KV k="Type" v={trigger.type} mono />
+              <KV k="Trigger ID" v={trigger.id} mono copyable />
+              <KV k="Entry Function" v={trigger.functionId} mono copyable />
+              {trigger.actor && <KV k="Actor" v={trigger.actor} mono />}
+              {trigger.position && <KV k="Position" v={trigger.position} mono />}
+              {trigger.dimension && <KV k="Dimension" v={trigger.dimension} mono />}
+            </div>
+          )}
 
           {selection?.kind === "functionCall" && related.length > 0 && (
             <div className="detail__section">

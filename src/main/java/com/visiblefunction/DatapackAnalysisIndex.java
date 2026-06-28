@@ -64,6 +64,14 @@ final class DatapackAnalysisIndex {
 		return current.json();
 	}
 
+	static Set<String> functionIds() {
+		Set<String> ids = new LinkedHashSet<>();
+		for (FunctionInfo function : current.functions()) {
+			ids.add(function.id());
+		}
+		return Set.copyOf(ids);
+	}
+
 	private static AnalysisSnapshot build(ResourceManager resourceManager) {
 		List<String> warnings = new ArrayList<>();
 		Map<String, List<String>> tags = resolvedTags(resourceManager, warnings);

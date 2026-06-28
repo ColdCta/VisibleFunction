@@ -1,5 +1,6 @@
 import type {
   DatapackAnalysisResponse,
+  DatapackTriggerResponse,
   GroupedResponse,
   HealthResponse,
   RecordingPayload,
@@ -81,6 +82,7 @@ function seed(): TraceRecord[] {
     let evCounter = 0;
     order.forEach((o, i) => {
       const ts = t + i * 5;
+      const trigger = mockRuntimeTrigger(o.fn);
       if (o.type === "COMMAND") {
         const cmd = cmds[(o.idx + tick + i) % cmds.length];
         const action = "execute_run";
@@ -100,6 +102,11 @@ function seed(): TraceRecord[] {
             source: "function",
             function: o.fn,
             functionCallId: o.fcid,
+            ...(trigger ? {
+              triggerType: trigger.type,
+              triggerId: trigger.id,
+              triggerFunction: trigger.functionId,
+            } : {}),
           },
           basicFields: {
             command: cmd,
@@ -109,10 +116,21 @@ function seed(): TraceRecord[] {
             sequence: String(o.idx + 1),
             action,
             command_type: cmd.startsWith("execute") ? "execute" : cmd.startsWith("data") ? "data" : cmd.startsWith("scoreboard") ? "scoreboard" : "none",
+            ...(trigger ? {
+              trigger_type: trigger.type,
+              trigger_id: trigger.id,
+              trigger_function: trigger.functionId,
+            } : {}),
           },
           detailedFields: {
             tick: String(tick),
             sequence: String(o.idx + 1),
+            ...(trigger ? {
+              trigger_actor: "Mock Player",
+              trigger_actor_entity: "minecraft:player mock-uuid",
+              trigger_position: "x=0.00, y=64.00, z=0.00",
+              trigger_dimension: "minecraft:overworld",
+            } : {}),
           },
         });
       } else {
@@ -134,6 +152,11 @@ function seed(): TraceRecord[] {
             source: "function",
             function: o.fn,
             functionCallId: o.fcid,
+            ...(trigger ? {
+              triggerType: trigger.type,
+              triggerId: trigger.id,
+              triggerFunction: trigger.functionId,
+            } : {}),
           },
           basicFields: {
             tick: String(tick),
@@ -144,16 +167,36 @@ function seed(): TraceRecord[] {
             storage,
             path: "display.value",
             result: "1",
+            ...(trigger ? {
+              trigger_type: trigger.type,
+              trigger_id: trigger.id,
+              trigger_function: trigger.functionId,
+            } : {}),
           },
           detailedFields: {
             tick: String(tick),
             event_action: action,
+            ...(trigger ? {
+              trigger_actor: "Mock Player",
+              trigger_position: "x=0.00, y=64.00, z=0.00",
+              trigger_dimension: "minecraft:overworld",
+            } : {}),
           },
         });
       }
     });
   }
   return out;
+}
+
+function mockRuntimeTrigger(functionId: string): { type: "advancement" | "enchantment"; id: string; functionId: string } | null {
+  if (functionId === "wtw:fight_system/on_hit" || functionId === "wtw:damage_core") {
+    return { type: "advancement", id: "demo:setup", functionId: "wtw:fight_system/on_hit" };
+  }
+  if (functionId === "wtw:damage_modifier_notcritical") {
+    return { type: "enchantment", id: "demo:impact", functionId: "wtw:damage_modifier_notcritical" };
+  }
+  return null;
 }
 
 let mockStarted = false;
@@ -225,6 +268,9 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
     if (path === "/api/v1/datapack-analysis") {
       return new Response(JSON.stringify(mockDatapackAnalysis()), { headers: { "Content-Type": "application/json" } });
     }
+    if (path === "/api/v1/datapack-triggers") {
+      return new Response(JSON.stringify(mockDatapackTriggers()), { headers: { "Content-Type": "application/json" } });
+    }
     if (path === "/api/v1/recording/status") {
       const body: RecordingStatus = {
         active: "false",
@@ -236,13 +282,25 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
       return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
     }
     if (path === "/api/v1/recordings") {
-      return new Response(JSON.stringify({ recordings: [] }), { headers: { "Content-Type": "application/json" } });
+      const startedAt = records[0]?.timestampMillis ?? 0;
+      return new Response(JSON.stringify({
+        recordings: [{
+          id: "mock",
+          startedAtMillis: startedAt,
+          endedAtMillis: lastTs,
+          durationMillis: Math.max(0, lastTs - startedAt),
+          file: "mock",
+          records: records.length,
+          format: "records-v1",
+        }],
+      }), { headers: { "Content-Type": "application/json" } });
     }
-    if (path === "/api/v1/recordings/latest") {
+    if (path === "/api/v1/recordings/latest" || path === "/api/v1/recordings/mock") {
       const startedAt = records[0]?.timestampMillis ?? 0;
       return new Response(
         JSON.stringify({
-          recording: { id: "mock", startedAtMillis: startedAt, endedAtMillis: lastTs, durationMillis: lastTs - startedAt, file: "mock", records: records.length },
+          recording: { id: "mock", startedAtMillis: startedAt, endedAtMillis: lastTs, durationMillis: lastTs - startedAt, file: "mock", records: records.length, format: "records-v1" },
+          records,
           data: makeGrouped(records),
         } satisfies RecordingPayload),
         { headers: { "Content-Type": "application/json" } }
@@ -327,6 +385,7 @@ function generateOne(id: number, ts: number): TraceRecord {
   const fcid = rid();
   const fn = "wtw:fight_system/on_hit";
   const tick = 24095 + Math.floor(id / 20);
+  const trigger = mockRuntimeTrigger(fn);
   if (id % 5 === 0) {
     const action = id % 10 === 0 ? "storage_modified" : "scoreboard_score_set";
     return {
@@ -345,6 +404,9 @@ function generateOne(id: number, ts: number): TraceRecord {
         source: "function",
         function: fn,
         functionCallId: fcid,
+        triggerType: trigger?.type,
+        triggerId: trigger?.id,
+        triggerFunction: trigger?.functionId,
       },
       basicFields: {
         tick: String(tick),
@@ -355,8 +417,17 @@ function generateOne(id: number, ts: number): TraceRecord {
         storage: "wtw:temp",
         path: "display.value",
         result: "1",
+        trigger_type: trigger?.type ?? "none",
+        trigger_id: trigger?.id ?? "none",
+        trigger_function: trigger?.functionId ?? "none",
       },
-      detailedFields: { tick: String(tick), event_action: action },
+      detailedFields: {
+        tick: String(tick),
+        event_action: action,
+        trigger_actor: "Mock Player",
+        trigger_position: "x=0.00, y=64.00, z=0.00",
+        trigger_dimension: "minecraft:overworld",
+      },
     };
   }
 
@@ -376,6 +447,9 @@ function generateOne(id: number, ts: number): TraceRecord {
       source: "function",
       function: fn,
       functionCallId: fcid,
+      triggerType: trigger?.type,
+      triggerId: trigger?.id,
+      triggerFunction: trigger?.functionId,
     },
     basicFields: {
       command: "execute as @a[nbt={...}]",
@@ -385,6 +459,9 @@ function generateOne(id: number, ts: number): TraceRecord {
       sequence: "1",
       action: "execute_run",
       command_type: "execute",
+      trigger_type: trigger?.type ?? "none",
+      trigger_id: trigger?.id ?? "none",
+      trigger_function: trigger?.functionId ?? "none",
     },
     detailedFields: { tick: String(tick) },
   };
@@ -604,6 +681,129 @@ function mockDatapackAnalysis(): DatapackAnalysisResponse {
       "minecraft:tick": ["wtw:tick"],
       "wtw:damage_display": ["wtw:display_damage"],
     },
+  };
+}
+
+function mockDatapackTriggers(): DatapackTriggerResponse {
+  const advancementTrigger = {
+    id: "advancement:demo:setup:mock",
+    sourceType: "advancement" as const,
+    sourceId: "demo:setup",
+    kind: "reward" as const,
+    function: "wtw:fight_system/on_hit",
+    pack: "file/demo",
+    effectComponent: "none",
+    jsonPath: "$.rewards.function",
+    conditionSummary: "minecraft:tick",
+    affected: "none",
+    enchanted: "none",
+    functionExists: true,
+    tickFunction: false,
+  };
+  const enchantmentTrigger = {
+    id: "enchantment:demo:impact:mock",
+    sourceType: "enchantment" as const,
+    sourceId: "demo:impact",
+    kind: "run_function" as const,
+    function: "wtw:damage_modifier_notcritical",
+    pack: "file/demo",
+    effectComponent: "minecraft:post_attack",
+    jsonPath: '$.effects["minecraft:post_attack"][0]["effect"]',
+    conditionSummary: '{"condition":"minecraft:entity_properties"}',
+    affected: "victim",
+    enchanted: "attacker",
+    functionExists: true,
+    tickFunction: false,
+  };
+  const enchantmentTriggerExtra = {
+    ...enchantmentTrigger,
+    id: "enchantment:demo:impact:mock-extra",
+    jsonPath: '$.effects["minecraft:post_attack"][1]["effect"]',
+    conditionSummary: '{"condition":"minecraft:random_chance","chance":0.25}',
+    affected: "attacker",
+  };
+  const missingAdvancementTrigger = {
+    ...advancementTrigger,
+    id: "advancement:demo:missing_reward:mock",
+    sourceId: "demo:missing_reward",
+    function: "demo:not_loaded",
+    jsonPath: "$.rewards.function",
+    conditionSummary: "minecraft:impossible",
+    functionExists: false,
+  };
+  return {
+    analysis: {
+      generatedAtMillis: Date.now(),
+      advancementResourceCount: 2,
+      enchantmentResourceCount: 1,
+      advancementSourceCount: 2,
+      enchantmentSourceCount: 1,
+      advancementTriggerCount: 2,
+      enchantmentTriggerCount: 2,
+      triggerCount: 4,
+      functionCount: 3,
+      warnings: [],
+    },
+    advancements: [
+      {
+        id: "demo:setup",
+        pack: "file/demo",
+        parent: "none",
+        function: "wtw:fight_system/on_hit",
+        triggerId: advancementTrigger.id,
+        criteria: [{ name: "entered_world", trigger: "minecraft:tick" }],
+      },
+      {
+        id: "demo:missing_reward",
+        pack: "file/demo",
+        parent: "demo:setup",
+        function: "demo:not_loaded",
+        triggerId: missingAdvancementTrigger.id,
+        criteria: [{ name: "never", trigger: "minecraft:impossible" }],
+      },
+    ],
+    enchantments: [
+      {
+        id: "demo:impact",
+        pack: "file/demo",
+        supportedItems: "#minecraft:enchantable/weapon",
+        primaryItems: "",
+        slots: ["mainhand"],
+        functions: ["wtw:damage_modifier_notcritical"],
+        triggerIds: [enchantmentTrigger.id, enchantmentTriggerExtra.id],
+        triggerCount: 2,
+      },
+    ],
+    triggers: [advancementTrigger, missingAdvancementTrigger, enchantmentTrigger, enchantmentTriggerExtra],
+    functions: [
+      {
+        id: "wtw:fight_system/on_hit",
+        functionExists: true,
+        tickFunction: false,
+        triggerCount: 1,
+        triggerIds: [advancementTrigger.id],
+        advancements: ["demo:setup"],
+        enchantments: [],
+      },
+      {
+        id: "wtw:damage_modifier_notcritical",
+        functionExists: true,
+        tickFunction: false,
+        triggerCount: 2,
+        triggerIds: [enchantmentTrigger.id, enchantmentTriggerExtra.id],
+        advancements: [],
+        enchantments: ["demo:impact"],
+      },
+      {
+        id: "demo:not_loaded",
+        functionExists: false,
+        tickFunction: false,
+        triggerCount: 1,
+        triggerIds: [missingAdvancementTrigger.id],
+        advancements: ["demo:missing_reward"],
+        enchantments: [],
+      },
+    ],
   };
 }
 

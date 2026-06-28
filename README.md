@@ -28,6 +28,7 @@ VisibleFunction records commands, function calls, and the game events they produ
 * **In-Game Timeline**: Browses command, event, and function records by tick.
 * **Web Debugger**: Provides Live Monitor, recording replay, filters, an inspector panel, and Datapack Graph.
 * **Static Datapack Analysis**: Analyzes function references, execute conditions, selectors, scoreboard/storage/tag/bossbar variables, entry points, missing targets, and circular calls.
+* **Datapack Trigger Attribution**: Detects advancement rewards and nested enchantment `run_function` effects statically, then attaches the real runtime trigger, actor, entity, and position to executed commands.
 * **Local Recording**: Streams records directly to disk during recording to avoid long-running recordings from continuously occupying game heap memory.
 
 ## Requirements
@@ -127,6 +128,7 @@ After starting the Export Server, the following read-only endpoints are availabl
 | `GET /api/v1/grouped`           | Records grouped by category and function            |
 | `GET /api/v1/tick-filter`       | Tick Filter aggregation results                     |
 | `GET /api/v1/datapack-analysis` | Static datapack analysis snapshot                   |
+| `GET /api/v1/datapack-triggers` | Advancement/enchantment function trigger index      |
 | `GET /api/v1/stream`            | Real-time SSE record stream                         |
 | `GET /api/v1/recording/status`  | Current recording status                            |
 | `GET /api/v1/recordings`        | Local recording list                                |
@@ -136,6 +138,7 @@ After starting the Export Server, the following read-only endpoints are availabl
 Record endpoints support the `after`, `limit`, and `tail` query parameters. For more complete field descriptions and frontend integration notes, see:
 
 * [Datapack Analysis API](docs/datapack-analysis-api.md)
+* [Datapack Trigger API](docs/datapack-trigger-api.md)
 * [Frontend Integration Guide](docs/frontend-agent-brief.md)
 
 ## Recording Files
@@ -206,5 +209,3 @@ docs/           API and frontend integration documentation
 ## License
 
 VisibleFunction is licensed under the [MIT License](LICENSE).
-
-

@@ -150,6 +150,17 @@ Recommended flow:
 5. If SSE disconnects, show reconnecting state and let EventSource retry.
 6. If SSE repeatedly fails, fallback to polling `/api/v1/records?after=<lastId>`.
 
+### Datapack Function Triggers
+
+```http
+GET /api/v1/datapack-triggers
+```
+
+Returns cached advancement reward-function and enchantment `run_function`
+relationships. Use `triggers` for source-to-function edges and `functions` for
+reverse lookup. The complete schema is documented in
+[`datapack-trigger-api.md`](datapack-trigger-api.md).
+
 ### Recordings
 
 Recording captures all VisibleFunction records from start to stop and writes a standalone JSON file when stopped.
@@ -255,7 +266,10 @@ Approximate record:
     "commandId": "386",
     "source": "function",
     "function": "wtw:test/test_dice",
-    "functionCallId": "565"
+    "functionCallId": "565",
+    "triggerType": "enchantment",
+    "triggerId": "demo:impact",
+    "triggerFunction": "demo:on_hit"
   },
   "basicFields": {
     "command": "/data modify storage ...",
@@ -279,6 +293,10 @@ Important fields:
 - `commandContext.commandId`: relationship key between command and event.
 - `commandContext.function`: datapack function id or `none`.
 - `commandContext.functionCallId`: function call grouping key or `none`.
+- `commandContext.triggerType`: optional runtime origin, currently `advancement`
+  or `enchantment`.
+- `commandContext.triggerId`: advancement/enchantment id for a real trigger.
+- `commandContext.triggerFunction`: function directly declared by the trigger.
 - `basicFields` and `detailedFields`: show all unknown fields in the details panel, because backend fields will continue to expand.
 
 ## 4. Visual Target

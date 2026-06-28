@@ -8,6 +8,7 @@ import {
   type RelationshipLane,
   type RelationshipNode,
 } from "../store/relationshipGraph";
+import { recordTriggerSource, triggerBadge, triggerSourceKey } from "../store/recordNorm";
 import { recordTick } from "../store/traceTime";
 
 const NODE_WIDTH = 250;
@@ -233,6 +234,13 @@ function RelationshipInspector({
     }, new Map<string, number>())
   ).sort((a, b) => b[1] - a[1]);
   const related = model.relatedRecords.map((record) => record.id).filter((id) => id !== model.anchorEvent.id);
+  const triggerSources = Array.from(
+    model.events.reduce((map, event) => {
+      const source = recordTriggerSource(event);
+      if (source) map.set(triggerSourceKey(source), source);
+      return map;
+    }, new Map<string, NonNullable<ReturnType<typeof recordTriggerSource>>>()).values()
+  );
 
   return (
     <aside className="relationship-inspector">
@@ -252,6 +260,21 @@ function RelationshipInspector({
         <Stat label="Rendered nodes" value={renderedNodeCount} />
         <Stat label="Expanded groups" value={expandedGroupCount} />
       </div>
+
+      {triggerSources.length > 0 && (
+        <>
+          <div className="relationship-inspector__title">Trigger Sources</div>
+          <div className="relationship-inspector__triggers">
+            {triggerSources.map((source) => (
+              <div key={triggerSourceKey(source)} className="relationship-inspector__trigger">
+                <span className="trigger-badge">{triggerBadge(source)}</span>
+                <span className="mono" title={source.id}>{source.id}</span>
+                <strong className="mono" title={source.functionId}>{source.functionId}</strong>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="relationship-inspector__title">Event Actions</div>
       <div className="relationship-inspector__actions">

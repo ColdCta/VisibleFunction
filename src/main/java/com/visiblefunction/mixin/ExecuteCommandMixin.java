@@ -35,7 +35,8 @@ abstract class ExecuteCommandMixin {
 				commandSourceStack,
 				CommandTraceContext.functionFor(frame),
 				CommandTraceContext.functionCallIdFor(frame),
-				CommandTraceContext.functionIsTickFor(frame)
+				CommandTraceContext.functionIsTickFor(frame),
+				CommandTraceContext.triggerFor(frame)
 			);
 			VisibleFunction.recordCommandTrace(visiblefunction$commandContext);
 		}

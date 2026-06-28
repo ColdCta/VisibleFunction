@@ -43,7 +43,10 @@ final class VisibleFunctionExportJson {
 		property(json, "commandId", basicFields.getOrDefault("command_id", "none")).append(',');
 		property(json, "source", basicFields.getOrDefault("source", "unknown")).append(',');
 		property(json, "function", function).append(',');
-		property(json, "functionCallId", basicFields.getOrDefault("function_call_id", "none"));
+		property(json, "functionCallId", basicFields.getOrDefault("function_call_id", "none")).append(',');
+		property(json, "triggerType", basicFields.getOrDefault("trigger_type", "none")).append(',');
+		property(json, "triggerId", basicFields.getOrDefault("trigger_id", "none")).append(',');
+		property(json, "triggerFunction", basicFields.getOrDefault("trigger_function", "none"));
 		json.append("},");
 		json.append("\"basicFields\":");
 		fields(json, basicFields).append(',');

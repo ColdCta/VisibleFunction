@@ -144,6 +144,9 @@ function matchesSearch(r: TraceRecord, q: string): boolean {
   if (r.summary.toLowerCase().includes(q)) return true;
   if (r.commandContext.command.toLowerCase().includes(q)) return true;
   if (r.commandContext.function.toLowerCase().includes(q)) return true;
+  if ((r.commandContext.triggerType ?? "").toLowerCase().includes(q)) return true;
+  if ((r.commandContext.triggerId ?? "").toLowerCase().includes(q)) return true;
+  if ((r.commandContext.triggerFunction ?? "").toLowerCase().includes(q)) return true;
   if (r.commandType.toLowerCase().includes(q)) return true;
   if (effectiveAction(r).toLowerCase().includes(q)) return true;
   for (const v of Object.values(r.basicFields)) {

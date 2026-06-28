@@ -46,16 +46,22 @@ public class VisibleFunction implements ModInitializer {
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			DatapackTickFunctionIndex.rebuild(server);
 			DatapackAnalysisIndex.rebuild(server);
+			DatapackTriggerIndex.rebuild(server);
+			DatapackRuntimeTriggerIndex.rebuild(server);
 		});
 		ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
 			if (success) {
 				DatapackTickFunctionIndex.rebuild(server, resourceManager);
 				DatapackAnalysisIndex.rebuild(resourceManager);
+				DatapackTriggerIndex.rebuild(resourceManager);
+				DatapackRuntimeTriggerIndex.rebuild(server);
 			}
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
 			DatapackTickFunctionIndex.clear();
 			DatapackAnalysisIndex.clear();
+			DatapackTriggerIndex.clear();
+			DatapackRuntimeTriggerIndex.clear();
 			VisibleFunctionRecordingManager.instance().stopIfActive();
 			VisibleFunctionExportServer.instance().stop();
 		});

@@ -18,6 +18,7 @@ final class CommandTraceFormatter {
 		appendField(basic, "function", context.function());
 		appendField(basic, "function_call_id", context.functionCallIdText());
 		appendField(basic, "position", context.position());
+		appendTriggerFields(basic, context.trigger(), false);
 		appendNestedCommand(basic, context);
 		appendFields(basic, interpretation.basicFields());
 
@@ -27,6 +28,7 @@ final class CommandTraceFormatter {
 		appendField(detailed, "function", context.function());
 		appendField(detailed, "function_call_id", context.functionCallIdText());
 		appendField(detailed, "position", context.position());
+		appendTriggerFields(detailed, context.trigger(), true);
 		appendNestedCommand(detailed, context);
 		appendFields(detailed, interpretation.basicFields());
 		appendField(detailed, "dimension", context.dimension());
@@ -46,6 +48,26 @@ final class CommandTraceFormatter {
 	private static void appendNestedCommand(StringBuilder text, CommandTraceContext.CommandContext context) {
 		if (context.hasNestedCommand()) {
 			appendField(text, "nested_command", context.effectiveCommand());
+		}
+	}
+
+	static void appendTriggerFields(
+		StringBuilder text,
+		CommandTraceContext.TriggerContext trigger,
+		boolean detailed
+	) {
+		if (trigger == null) {
+			return;
+		}
+
+		appendField(text, "trigger_type", trigger.type());
+		appendField(text, "trigger_id", trigger.sourceId());
+		appendField(text, "trigger_function", trigger.function());
+		if (detailed) {
+			appendField(text, "trigger_actor", trigger.actorName());
+			appendField(text, "trigger_actor_entity", trigger.actorEntity());
+			appendField(text, "trigger_position", trigger.position());
+			appendField(text, "trigger_dimension", trigger.dimension());
 		}
 	}
 

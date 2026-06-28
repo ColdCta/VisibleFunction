@@ -6,7 +6,12 @@ import { selectViewModel } from "../../store/selectors";
 import { BUCKET_SIZES, formatBucketHeader } from "../../store/timelineBuckets";
 import type { TickFilterBand, TimelineBucket, TraceRecord } from "../../api/types";
 import { recordTick } from "../../store/traceTime";
-import { effectiveAction } from "../../store/recordNorm";
+import {
+  effectiveAction,
+  recordTriggerSource,
+  triggerBadge,
+  triggerSourceKey,
+} from "../../store/recordNorm";
 import { FunctionCard } from "./FunctionCard";
 
 const COLUMN_WIDTH = 220;
@@ -340,17 +345,19 @@ function EventLane({
           const lead = pickLead(evs);
           const extras = evs.length - 1;
           const label = effectiveAction(lead) || lead.subject;
+          const triggerSummary = summarizeTriggers(evs);
           return (
             <div key={b.key} className={"lane__cell lane__cell--event" + currentClass}>
               <button
                 className={"event-pill" + (highlightIds.has(lead.id) ? " is-highlight" : "")}
                 onClick={() => onSelect(lead, evs, label)}
                 onDoubleClick={() => { onSelect(lead, evs, label); onZoom(lead); }}
-                title={`${label}${extras > 0 ? ` +${extras}` : ""} (dbl-click to zoom)`}
+                title={`${label}${extras > 0 ? ` +${extras}` : ""}${triggerSummary.title ? `\nTriggered by ${triggerSummary.title}` : ""} (dbl-click to zoom)`}
               >
                 <span className="event-pill__icon">◆</span>
                 <span className="event-pill__label">{label}</span>
                 {extras > 0 && <span className="event-pill__count">+{extras}</span>}
+                {triggerSummary.label && <span className="trigger-badge trigger-badge--event">{triggerSummary.label}</span>}
               </button>
             </div>
           );
@@ -411,12 +418,15 @@ function FunctionLane({
                 const evs = recs.filter((r) => r.type === "EVENT").length;
                 const selected = selection?.kind === "functionCall" && selection.functionCallId === fcid;
                 const dim = !selected && highlightIds.size > 0 && !recs.some((r) => highlightIds.has(r.id));
+                const triggerSummary = summarizeTriggers(recs);
                 return (
                   <FunctionCard
                     key={fcid}
                     name={fn}
                     cmds={cmds}
                     events={evs}
+                    triggerLabel={triggerSummary.label}
+                    triggerTitle={triggerSummary.title}
                     selected={selected}
                     dim={Boolean(dim)}
                     onClick={() => onSelectCall(fcid)}
@@ -726,4 +736,22 @@ function pickLead(events: TraceRecord[]): TraceRecord {
     if (hit) return hit;
   }
   return events[0];
+}
+
+function summarizeTriggers(records: TraceRecord[]): { label?: string; title?: string } {
+  const sources = new Map<string, NonNullable<ReturnType<typeof recordTriggerSource>>>();
+  for (const record of records) {
+    const source = recordTriggerSource(record);
+    if (source) sources.set(triggerSourceKey(source), source);
+  }
+  const values = Array.from(sources.values());
+  if (values.length === 0) return {};
+  if (values.length === 1) {
+    const source = values[0];
+    return { label: triggerBadge(source), title: `${source.type} ${source.id}` };
+  }
+  return {
+    label: "MIXED",
+    title: values.map((source) => `${source.type} ${source.id}`).join(", "),
+  };
 }

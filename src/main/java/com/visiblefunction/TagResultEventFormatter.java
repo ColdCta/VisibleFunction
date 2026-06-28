@@ -78,6 +78,7 @@ final class TagResultEventFormatter {
 		appendField(text, "function", commandContext.function());
 		appendField(text, "function_call_id", commandContext.functionCallIdText());
 		appendField(text, "position", commandContext.position());
+		CommandTraceFormatter.appendTriggerFields(text, commandContext.trigger(), false);
 	}
 
 	private static String summary(String action, Collection<? extends Entity> targets, String tag, int affectedTargets) {

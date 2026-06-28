@@ -1,5 +1,14 @@
 import type { TraceRecord } from "../api/types";
 
+export type RuntimeTriggerSource = {
+  type: "advancement" | "enchantment" | string;
+  id: string;
+  functionId: string;
+  actor: string;
+  position: string;
+  dimension: string;
+};
+
 // ---------------------------------------------------------------------------
 // Backend contract workaround (M1). Do not delete without verifying the backend.
 // ---------------------------------------------------------------------------
@@ -39,4 +48,46 @@ export function recordResult(r: TraceRecord): string {
 
 export function recordDuration(r: TraceRecord): string {
   return r.basicFields.duration ?? r.detailedFields.duration ?? "";
+}
+
+export function recordTriggerSource(r: TraceRecord): RuntimeTriggerSource | null {
+  const type = meaningful(
+    r.commandContext.triggerType ??
+    r.basicFields.trigger_type ??
+    r.detailedFields.trigger_type
+  );
+  const id = meaningful(
+    r.commandContext.triggerId ??
+    r.basicFields.trigger_id ??
+    r.detailedFields.trigger_id
+  );
+  const functionId = meaningful(
+    r.commandContext.triggerFunction ??
+    r.basicFields.trigger_function ??
+    r.detailedFields.trigger_function
+  );
+  if (!type && !id && !functionId) return null;
+  return {
+    type: type || "unknown",
+    id: id || "unknown",
+    functionId: functionId || "unknown",
+    actor: meaningful(r.detailedFields.trigger_actor ?? r.basicFields.trigger_actor),
+    position: meaningful(r.detailedFields.trigger_position ?? r.basicFields.trigger_position),
+    dimension: meaningful(r.detailedFields.trigger_dimension ?? r.basicFields.trigger_dimension),
+  };
+}
+
+export function triggerSourceKey(source: RuntimeTriggerSource): string {
+  return `${source.type}\u001f${source.id}\u001f${source.functionId}`;
+}
+
+export function triggerBadge(source: RuntimeTriggerSource): string {
+  if (source.type === "advancement") return "ADV";
+  if (source.type === "enchantment") return "ENCH";
+  return source.type.slice(0, 5).toUpperCase() || "SRC";
+}
+
+function meaningful(value: string | undefined): string {
+  const normalized = (value ?? "").trim();
+  return !normalized || normalized.toLowerCase() === "none" ? "" : normalized;
 }
