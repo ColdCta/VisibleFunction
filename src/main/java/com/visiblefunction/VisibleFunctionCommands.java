@@ -7,6 +7,8 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.permissions.PermissionSet;
+import net.minecraft.server.permissions.Permissions;
 
 final class VisibleFunctionCommands {
 	private VisibleFunctionCommands() {
@@ -19,9 +21,11 @@ final class VisibleFunctionCommands {
 				.then(Commands.literal("status")
 					.executes(context -> showStatus(context, settings)))
 				.then(Commands.literal("enabled")
+					.requires(VisibleFunctionCommands::canManage)
 					.then(Commands.argument("value", BoolArgumentType.bool())
 						.executes(context -> setEnabled(context, settings, BoolArgumentType.getBool(context, "value")))))
 				.then(Commands.literal("output")
+					.requires(VisibleFunctionCommands::canManage)
 					.then(Commands.literal("window")
 						.executes(context -> setOutputTarget(context, settings, VisibleFunctionSettings.OutputTarget.WINDOW)))
 					.then(Commands.literal("chat")
@@ -31,6 +35,7 @@ final class VisibleFunctionCommands {
 					.then(Commands.literal("both")
 						.executes(context -> setOutputTarget(context, settings, VisibleFunctionSettings.OutputTarget.BOTH))))
 				.then(Commands.literal("window")
+					.requires(VisibleFunctionCommands::canManage)
 					.then(Commands.literal("width")
 						.then(Commands.argument("value", IntegerArgumentType.integer(160, 640))
 							.executes(context -> setWindowWidth(context, settings, IntegerArgumentType.getInteger(context, "value")))))
@@ -41,29 +46,44 @@ final class VisibleFunctionCommands {
 						.then(Commands.argument("milliseconds", IntegerArgumentType.integer(1000, 60000))
 							.executes(context -> setWindowTimeout(context, settings, IntegerArgumentType.getInteger(context, "milliseconds"))))))
 				.then(Commands.literal("timeline")
+					.requires(VisibleFunctionCommands::canManage)
 					.then(Commands.literal("buffer")
 						.then(Commands.argument("ticks", IntegerArgumentType.integer(20, 1200))
 							.executes(context -> setTimelineBuffer(context, settings, IntegerArgumentType.getInteger(context, "ticks"))))))
 				.then(Commands.literal("export")
 					.then(Commands.literal("start")
+						.requires(VisibleFunctionCommands::canManage)
 						.executes(context -> setExportEnabled(context, settings, true)))
 					.then(Commands.literal("stop")
+						.requires(VisibleFunctionCommands::canManage)
 						.executes(context -> setExportEnabled(context, settings, false)))
 					.then(Commands.literal("status")
 						.executes(context -> showExportStatus(context, settings)))
 					.then(Commands.literal("port")
+						.requires(VisibleFunctionCommands::canManage)
 						.then(Commands.argument("value", IntegerArgumentType.integer(1024, 65535))
 							.executes(context -> setExportPort(context, settings, IntegerArgumentType.getInteger(context, "value"))))))
 				.then(Commands.literal("recording")
 					.then(Commands.literal("toggle")
+						.requires(VisibleFunctionCommands::canManage)
 						.executes(VisibleFunctionCommands::toggleRecording))
 					.then(Commands.literal("start")
+						.requires(VisibleFunctionCommands::canManage)
 						.executes(VisibleFunctionCommands::startRecording))
 					.then(Commands.literal("stop")
+						.requires(VisibleFunctionCommands::canManage)
 						.executes(VisibleFunctionCommands::stopRecording))
 					.then(Commands.literal("status")
 						.executes(VisibleFunctionCommands::showRecordingStatus)))
 		));
+	}
+
+	static boolean canManage(CommandSourceStack source) {
+		return canManage(source.permissions());
+	}
+
+	static boolean canManage(PermissionSet permissions) {
+		return permissions.hasPermission(Permissions.COMMANDS_GAMEMASTER);
 	}
 
 	private static int showStatus(CommandContext<CommandSourceStack> context, VisibleFunctionSettings settings) {

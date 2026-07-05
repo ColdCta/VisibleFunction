@@ -43,6 +43,7 @@ export function Timeline() {
   const openRelationshipGraphForEvents = useTraceStore((s) => s.openRelationshipGraphForEvents);
   const highlightIds = useTraceStore((s) => s.highlightIds);
   const connection = useTraceStore((s) => s.connection);
+  const tickFilterBuckets = useTraceStore((s) => s.tickFilterBuckets);
   const scrollerRef = useRef<HTMLDivElement>(null);
   // Mirrors the scroller's horizontal scroll position via rAF-throttled listener so the minimap's
   // viewport rectangle tracks the native scrollbar (the minimap is read-only — no drag/paging).
@@ -50,12 +51,12 @@ export function Timeline() {
   const warming = liveWarmupState === "warming";
 
   const vm = useMemo(
-    () => warming ? EMPTY_VIEW_MODEL : selectViewModel(records, indexes, filters, bucketTicks, viewRange),
-    [records, indexes, filters, bucketTicks, viewRange, warming]
+    () => warming ? EMPTY_VIEW_MODEL : selectViewModel(records, indexes, filters, bucketTicks, viewRange, tickFilterBuckets),
+    [records, indexes, filters, bucketTicks, viewRange, tickFilterBuckets, warming]
   );
 
   const visibleBuckets = useMemo(() => {
-    if (!viewRange.min && !viewRange.max) return vm.buckets;
+    if (!Number.isFinite(viewRange.min) || !Number.isFinite(viewRange.max)) return vm.buckets;
     // Use <= on the max boundary so the bucket containing the latest tick (startTick ===
     // viewRange.max in live mode) is included. With < it was excluded, hiding the newest frame.
     return vm.buckets.filter((b) => b.endTick > viewRange.min && b.startTick <= viewRange.max);
@@ -67,9 +68,9 @@ export function Timeline() {
   // keeps updating regardless of filtering.
   const currentBucketKey = useMemo(() => {
     const latestTick = range.max;
-    if (!latestTick) return visibleBuckets[visibleBuckets.length - 1]?.key;
+    if (records.length === 0) return visibleBuckets[visibleBuckets.length - 1]?.key;
     return String(Math.floor(latestTick / bucketTicks));
-  }, [range.max, bucketTicks, visibleBuckets]);
+  }, [range.max, bucketTicks, visibleBuckets, records.length]);
 
   // Horizontal virtualization (docs :791). Only render the columns actually in (or near) the
   // scroll viewport, not every bucket in the view range. All four lanes share the same column

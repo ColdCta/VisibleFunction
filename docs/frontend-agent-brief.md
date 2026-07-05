@@ -177,6 +177,8 @@ GET /api/v1/recordings/latest
 GET /api/v1/recordings/<id>
 ```
 
+`GET /api/v1/tick-filter` is the authoritative high-frequency classification. Live views should refresh this endpoint once per second and adapt its `firstSeenTick`, `lastSeenTick`, `recordIds`, and `commandIds` into timeline bands. Do not reimplement frequency thresholds in the frontend. Recording replay should use `data.tickFilter` from the recording payload.
+
 Status response:
 
 ```json
@@ -187,7 +189,7 @@ Status response:
   "directory": "C:\\path\\to\\game\\visiblefunction-recordings",
   "activeFile": "none",
   "completed": "1",
-  "latest": "20260624-153012"
+  "latest": "20260624-153012-123-a1b2c3d4"
 }
 ```
 
@@ -197,12 +199,13 @@ Metadata response:
 {
   "recordings": [
     {
-      "id": "20260624-153012",
+      "id": "20260624-153012-123-a1b2c3d4",
       "startedAtMillis": 1782295812000,
       "endedAtMillis": 1782295820000,
       "durationMillis": 8000,
-      "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012.json",
-      "records": 128
+      "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012-123-a1b2c3d4.json",
+      "records": 128,
+      "recovered": false
     }
   ]
 }
@@ -213,13 +216,14 @@ Latest or specific recording response:
 ```json
 {
   "recording": {
-    "id": "20260624-153012",
+    "id": "20260624-153012-123-a1b2c3d4",
     "startedAtMillis": 1782295812000,
     "endedAtMillis": 1782295820000,
     "durationMillis": 8000,
-    "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012.json",
+    "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012-123-a1b2c3d4.json",
     "records": 128,
-    "format": "records-v1"
+    "format": "records-v2",
+    "recovered": false
   },
   "records": [
     {
@@ -243,6 +247,8 @@ Latest or specific recording response:
   }
 }
 ```
+
+Recording IDs are opaque. Do not derive timestamps by splitting the ID. `recovered: true` means the backend rebuilt the file from a journal left by an interrupted game process.
 
 Use recordings for the main WebView replay/export workflow.
 Prefer top-level `records` when present. Fall back to `data.commands/events/functions/other` for older recording files.

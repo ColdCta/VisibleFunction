@@ -19,20 +19,19 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.Deque;
-import java.util.Iterator;
 import java.util.Locale;
-import java.util.Map;
-import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class CommandTraceContext {
 	private static final int RETAIN_TICKS = 5;
 	private static final ThreadLocal<String> SOURCE_OVERRIDE = new ThreadLocal<>();
 	private static final ThreadLocal<Boolean> TICK_FUNCTION_DISPATCH = ThreadLocal.withInitial(() -> false);
-	private static final ThreadLocal<Deque<CommandContext>> ACTIVE_CONTEXTS = ThreadLocal.withInitial(ArrayDeque::new);
+	private static final ThreadLocal<TraceContextStack<CommandContext>> ACTIVE_CONTEXTS = ThreadLocal.withInitial(TraceContextStack::new);
 	private static final ThreadLocal<Deque<TriggerContext>> ACTIVE_TRIGGERS = ThreadLocal.withInitial(ArrayDeque::new);
-	private static final Map<Frame, FunctionFrame> FUNCTION_FRAMES = Collections.synchronizedMap(new WeakHashMap<>());
-	private static final Map<MinecraftServer, Deque<RetainedCommandContext>> RECENT_CONTEXTS = Collections.synchronizedMap(new WeakHashMap<>());
+	private static final java.util.Map<Frame, FunctionFrame> FUNCTION_FRAMES =
+		Collections.synchronizedMap(new java.util.WeakHashMap<>());
+	private static final RecentContextStore<MinecraftServer, CommandContext> RECENT_CONTEXTS =
+		new RecentContextStore<>(RETAIN_TICKS, 32);
 	private static final AtomicLong NEXT_COMMAND_ID = new AtomicLong(1);
 	private static final AtomicLong NEXT_FUNCTION_CALL_ID = new AtomicLong(1);
 
@@ -176,44 +175,24 @@ public final class CommandTraceContext {
 	}
 
 	public static void pop(CommandContext context) {
-		Deque<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
-
-		if (!activeContexts.isEmpty() && activeContexts.peek() == context) {
-			activeContexts.pop();
-		} else {
-			activeContexts.remove(context);
+		TraceContextStack<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
+		activeContexts.pop(context);
+		if (activeContexts.isEmpty()) {
+			ACTIVE_CONTEXTS.remove();
 		}
-
 		retain(context);
 	}
 
 	public static CommandContext currentOrRecent(MinecraftServer server) {
-		Deque<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
-
+		TraceContextStack<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
 		if (!activeContexts.isEmpty()) {
-			return activeContexts.peek();
+			return activeContexts.current();
 		}
-
-		Deque<RetainedCommandContext> retainedContexts = RECENT_CONTEXTS.get(server);
-		return retainedContexts == null || retainedContexts.isEmpty() ? null : retainedContexts.peekFirst().context();
+		return RECENT_CONTEXTS.current(server);
 	}
 
 	public static void tick(MinecraftServer server) {
-		Deque<RetainedCommandContext> retainedContexts = RECENT_CONTEXTS.get(server);
-
-		if (retainedContexts == null) {
-			return;
-		}
-
-		Iterator<RetainedCommandContext> iterator = retainedContexts.iterator();
-		while (iterator.hasNext()) {
-			RetainedCommandContext retainedContext = iterator.next();
-			retainedContext.tick();
-
-			if (retainedContext.expired()) {
-				iterator.remove();
-			}
-		}
+		RECENT_CONTEXTS.tick(server);
 	}
 
 	private static CommandContext build(
@@ -246,12 +225,7 @@ public final class CommandTraceContext {
 	}
 
 	private static void retain(CommandContext context) {
-		Deque<RetainedCommandContext> retainedContexts = RECENT_CONTEXTS.computeIfAbsent(context.server(), ignored -> new ArrayDeque<>());
-		retainedContexts.addFirst(new RetainedCommandContext(context, RETAIN_TICKS));
-
-		while (retainedContexts.size() > 32) {
-			retainedContexts.removeLast();
-		}
+		RECENT_CONTEXTS.retain(context.server(), context);
 	}
 
 	private static boolean isTickFunctionFrame(Identifier functionId) {
@@ -259,8 +233,8 @@ public final class CommandTraceContext {
 			return true;
 		}
 
-		Deque<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
-		if (!activeContexts.isEmpty() && "tick function".equals(activeContexts.peek().source())) {
+		TraceContextStack<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
+		if (!activeContexts.isEmpty() && "tick function".equals(activeContexts.current().source())) {
 			return true;
 		}
 
@@ -273,8 +247,8 @@ public final class CommandTraceContext {
 			return triggers.peek();
 		}
 
-		Deque<CommandContext> contexts = ACTIVE_CONTEXTS.get();
-		return contexts.isEmpty() ? null : contexts.peek().trigger();
+		TraceContextStack<CommandContext> contexts = ACTIVE_CONTEXTS.get();
+		return contexts.isEmpty() ? null : contexts.current().trigger();
 	}
 
 	private static String sourceKind(CommandSourceStack sourceStack, Identifier functionId, boolean tickFunction) {
@@ -361,25 +335,4 @@ public final class CommandTraceContext {
 	private record FunctionFrame(Identifier functionId, long callId, boolean tickFunction, TriggerContext trigger) {
 	}
 
-	private static final class RetainedCommandContext {
-		private final CommandContext context;
-		private int ticksRemaining;
-
-		private RetainedCommandContext(CommandContext context, int ticksRemaining) {
-			this.context = context;
-			this.ticksRemaining = ticksRemaining;
-		}
-
-		private CommandContext context() {
-			return context;
-		}
-
-		private void tick() {
-			ticksRemaining--;
-		}
-
-		private boolean expired() {
-			return ticksRemaining <= 0;
-		}
-	}
 }

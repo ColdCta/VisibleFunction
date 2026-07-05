@@ -92,7 +92,7 @@ export function TopBar() {
       )}
 
       <div className="topbar__actions">
-        <button onClick={togglePause} disabled={traceActionsDisabled} title="Pause/resume live rendering (UI only)">
+        <button onClick={() => void togglePause()} disabled={traceActionsDisabled || mode !== "live"} title="Pause/resume the live transport">
           {paused ? "Resume" : "Pause"}
         </button>
         <button onClick={clear} disabled={traceActionsDisabled} title="Clear current view (does not delete backend recordings)">

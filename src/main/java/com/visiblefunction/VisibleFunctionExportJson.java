@@ -6,9 +6,6 @@ import java.util.Map;
 
 final class VisibleFunctionExportJson {
 	private static final int TICK_MILLIS = 50;
-	private static final int HIGH_FREQUENCY_WINDOW_TICKS = 20;
-	private static final int HIGH_FREQUENCY_THRESHOLD = 8;
-	private static final int MAX_SAMPLE_RECORDS = 6;
 
 	private VisibleFunctionExportJson() {
 	}
@@ -115,10 +112,27 @@ final class VisibleFunctionExportJson {
 	}
 
 	static String tickFilter(List<ExportRecord> records) {
-		StringBuilder json = new StringBuilder(Math.max(128, records.size() * 128));
+		TickFilterEngine<ExportRecord> engine = new TickFilterEngine<>();
+		long currentTick = 0;
+		for (ExportRecord record : records) {
+			TickFilterEngine.Input<ExportRecord> input = tickFilterInput(record);
+			engine.add(input);
+			currentTick = Math.max(currentTick, input.tick());
+		}
+		return tickFilterSnapshots(engine.snapshots(currentTick));
+	}
+
+	static String tickFilterSnapshots(List<TickFilterEngine.Snapshot<ExportRecord>> buckets) {
+		StringBuilder json = new StringBuilder(Math.max(128, buckets.size() * 512));
 		json.append("{\"tickFilter\":");
-		tickFilterArray(json, records);
+		tickFilterSnapshotArray(json, buckets);
 		json.append('}');
+		return json.toString();
+	}
+
+	static String tickFilterArrayJson(List<TickFilterEngine.Snapshot<ExportRecord>> buckets) {
+		StringBuilder json = new StringBuilder(Math.max(64, buckets.size() * 512));
+		tickFilterSnapshotArray(json, buckets);
 		return json.toString();
 	}
 
@@ -263,7 +277,20 @@ final class VisibleFunctionExportJson {
 	}
 
 	private static StringBuilder tickFilterArray(StringBuilder json, List<ExportRecord> records) {
-		List<TickFilterBucket> buckets = tickFilterBuckets(records);
+		TickFilterEngine<ExportRecord> engine = new TickFilterEngine<>();
+		long currentTick = 0;
+		for (ExportRecord record : records) {
+			TickFilterEngine.Input<ExportRecord> input = tickFilterInput(record);
+			engine.add(input);
+			currentTick = Math.max(currentTick, input.tick());
+		}
+		return tickFilterSnapshotArray(json, engine.snapshots(currentTick));
+	}
+
+	private static StringBuilder tickFilterSnapshotArray(
+		StringBuilder json,
+		List<TickFilterEngine.Snapshot<ExportRecord>> buckets
+	) {
 		json.append('[');
 		for (int index = 0; index < buckets.size(); index++) {
 			if (index > 0) {
@@ -275,70 +302,10 @@ final class VisibleFunctionExportJson {
 		return json;
 	}
 
-	private static List<TickFilterBucket> tickFilterBuckets(List<ExportRecord> records) {
-		Map<String, TickFilterBucket> buckets = new LinkedHashMap<>();
-
-		for (ExportRecord record : records) {
-			Map<String, String> fields = parseFields(record.payload().basic());
-			String category = record.payload().category();
-			String function = fields.getOrDefault("function", "none");
-
-			if ("COMMAND".equals(category)) {
-				String command = normalizeCommand(record.payload().subject());
-				String source = fields.getOrDefault("source", "unknown");
-				String key = "COMMAND:" + command + "|" + source + "|" + function;
-				updateTickFilterBucket(buckets, key, "COMMAND", command, record, fields);
-			}
-
-			if ("EVENT".equals(category)) {
-				String command = fields.getOrDefault("command", "none");
-				String action = fields.getOrDefault("action", record.payload().summary());
-				String key = "EVENT:" + action + "|" + record.payload().subject() + "|" + command;
-				updateTickFilterBucket(buckets, key, "EVENT", record.payload().subject(), record, fields);
-			}
-
-			if (!"none".equals(function) && !function.isBlank()) {
-				updateTickFilterBucket(buckets, "FUNCTION:" + function, "FUNCTION", function, record, fields);
-			}
-		}
-
-		List<TickFilterBucket> captured = new java.util.ArrayList<>();
-		for (TickFilterBucket bucket : buckets.values()) {
-			if (bucket.captured()) {
-				captured.add(bucket);
-			}
-		}
-		captured.sort(java.util.Comparator
-			.comparingInt(TickFilterBucket::countLastSecond)
-			.reversed()
-			.thenComparing(java.util.Comparator.comparingLong(TickFilterBucket::lastSeenTick).reversed()));
-		return captured;
-	}
-
-	private static void updateTickFilterBucket(
-		Map<String, TickFilterBucket> buckets,
-		String key,
-		String type,
-		String displayName,
-		ExportRecord record,
-		Map<String, String> fields
-	) {
-		if (key.isBlank()) {
-			return;
-		}
-
-		long tick = parseTick(fields, record.timestampMillis() / TICK_MILLIS);
-		TickFilterBucket bucket = buckets.computeIfAbsent(
-			key,
-			ignored -> new TickFilterBucket(key, type, displayName, tick, fields.getOrDefault("source", "unknown"))
-		);
-		bucket.add(record, fields, tick);
-	}
-
-	private static void tickFilterBucket(StringBuilder json, TickFilterBucket bucket) {
+	private static void tickFilterBucket(StringBuilder json, TickFilterEngine.Snapshot<ExportRecord> bucket) {
 		json.append('{');
 		property(json, "key", bucket.key()).append(',');
-		property(json, "type", bucket.type()).append(',');
+		property(json, "type", bucket.type().name()).append(',');
 		property(json, "displayName", bucket.displayName()).append(',');
 		property(json, "firstSeenTick", bucket.firstSeenTick()).append(',');
 		property(json, "lastSeenTick", bucket.lastSeenTick()).append(',');
@@ -362,6 +329,35 @@ final class VisibleFunctionExportJson {
 			json.append(record(samples.get(index)));
 		}
 		json.append("]}");
+	}
+
+	static TickFilterEngine.Input<ExportRecord> tickFilterInput(ExportRecord record) {
+		Map<String, String> fields = parseFields(record.payload().basic());
+		String function = fields.getOrDefault("function", "none");
+		String source = fields.getOrDefault("source", "unknown");
+		String command = "COMMAND".equals(record.payload().category())
+			? normalizeCommand(record.payload().subject())
+			: fields.getOrDefault("command", "none");
+		String action = fields.getOrDefault("action", record.payload().summary());
+		long tick = parseTick(fields, record.timestampMillis() / TICK_MILLIS);
+		String sourceSummary = !"none".equals(function) && !function.isBlank()
+			? (isTickFunction(function) || "tick function".equals(source) ? "tick function " : "function ") + function
+			: source;
+		return new TickFilterEngine.Input<>(
+			record.id(),
+			record.payload().category(),
+			record.payload().subject(),
+			action,
+			command,
+			fields.getOrDefault("command_id", "none"),
+			source,
+			function,
+			sourceSummary,
+			tick,
+			record.timestampMillis(),
+			"tick function".equals(source) || isTickFunction(function),
+			record
+		);
 	}
 
 	private static StringBuilder longArray(StringBuilder json, List<Long> values) {
@@ -464,146 +460,6 @@ final class VisibleFunctionExportJson {
 		}
 
 		return DatapackTickFunctionIndex.isTickFunction(function);
-	}
-
-	private static final class TickFilterBucket {
-		private final String key;
-		private final String type;
-		private final String displayName;
-		private final long firstSeenTick;
-		private final java.util.Deque<Long> recentTicks = new java.util.ArrayDeque<>();
-		private final List<ExportRecord> sampleRecords = new java.util.ArrayList<>();
-		private final List<Long> recordIds = new java.util.ArrayList<>();
-		private final List<String> commandIds = new java.util.ArrayList<>();
-		private long lastSeenTick;
-		private long startMillis;
-		private long endMillis;
-		private int totalCount;
-		private String sourceSummary;
-		private boolean highFrequency;
-		private boolean tickFunction;
-
-		private TickFilterBucket(String key, String type, String displayName, long firstSeenTick, String sourceSummary) {
-			this.key = key;
-			this.type = type;
-			this.displayName = displayName;
-			this.firstSeenTick = firstSeenTick;
-			this.lastSeenTick = firstSeenTick;
-			this.sourceSummary = sourceSummary;
-		}
-
-		private void add(ExportRecord record, Map<String, String> fields, long tick) {
-			totalCount++;
-			lastSeenTick = tick;
-			startMillis = totalCount == 1 ? record.timestampMillis() : Math.min(startMillis, record.timestampMillis());
-			endMillis = totalCount == 1 ? record.timestampMillis() : Math.max(endMillis, record.timestampMillis());
-			String function = fields.getOrDefault("function", "none");
-			sourceSummary = sourceSummary(fields);
-			tickFunction = tickFunction || "tick function".equals(fields.getOrDefault("source", "unknown")) || isTickFunction(function);
-			recentTicks.addLast(tick);
-			pruneRecent(tick);
-			highFrequency = highFrequency || recentTicks.size() >= HIGH_FREQUENCY_THRESHOLD;
-			recordIds.add(record.id());
-
-			String commandId = fields.getOrDefault("command_id", "none");
-			if (!"none".equals(commandId) && !commandId.isBlank() && !commandIds.contains(commandId)) {
-				commandIds.add(commandId);
-			}
-
-			if (sampleRecords.size() >= MAX_SAMPLE_RECORDS) {
-				sampleRecords.removeFirst();
-			}
-			sampleRecords.add(record);
-		}
-
-		private String key() {
-			return key;
-		}
-
-		private String type() {
-			return type;
-		}
-
-		private String displayName() {
-			return displayName;
-		}
-
-		private long firstSeenTick() {
-			return firstSeenTick;
-		}
-
-		private long lastSeenTick() {
-			return lastSeenTick;
-		}
-
-		private long startMillis() {
-			return startMillis;
-		}
-
-		private long endMillis() {
-			return endMillis;
-		}
-
-		private int totalCount() {
-			return totalCount;
-		}
-
-		private int countLastSecond() {
-			pruneRecent(lastSeenTick);
-			return recentTicks.size();
-		}
-
-		private String sourceSummary() {
-			return sourceSummary;
-		}
-
-		private List<Long> recordIds() {
-			return List.copyOf(recordIds);
-		}
-
-		private List<String> commandIds() {
-			return List.copyOf(commandIds);
-		}
-
-		private List<ExportRecord> sampleRecords() {
-			return List.copyOf(sampleRecords);
-		}
-
-		private boolean captured() {
-			return highFrequency || tickFunction;
-		}
-
-		private boolean active() {
-			return captured() && countLastSecond() > 0;
-		}
-
-		private String reason() {
-			if (tickFunction && highFrequency) {
-				return "tick function + high frequency";
-			}
-
-			if (tickFunction) {
-				return "tick function";
-			}
-
-			return "high frequency";
-		}
-
-		private void pruneRecent(long tick) {
-			while (!recentTicks.isEmpty() && tick - recentTicks.peekFirst() > HIGH_FREQUENCY_WINDOW_TICKS) {
-				recentTicks.removeFirst();
-			}
-		}
-
-		private static String sourceSummary(Map<String, String> fields) {
-			String function = fields.getOrDefault("function", "none");
-			if (!"none".equals(function) && !function.isBlank()) {
-				boolean tickSource = "tick function".equals(fields.getOrDefault("source", "unknown")) || isTickFunction(function);
-				return (tickSource ? "tick function " : "function ") + function;
-			}
-
-			return fields.getOrDefault("source", "unknown");
-		}
 	}
 
 	static final class ExportRecord {

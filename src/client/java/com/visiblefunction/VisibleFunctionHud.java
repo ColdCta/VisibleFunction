@@ -5,11 +5,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,14 +19,11 @@ public final class VisibleFunctionHud {
 	private static final int MARGIN = 8;
 	private static final int TICK_MILLIS = 50;
 	private static final int FUNCTION_CALL_GAP_MILLIS = 250;
-	private static final int HIGH_FREQUENCY_WINDOW_TICKS = 20;
-	private static final int HIGH_FREQUENCY_THRESHOLD = 8;
-	private static final int MAX_SAMPLE_RECORDS = 6;
 	private static final int MAX_CLIENT_RECORDS = 20000;
 	private static final int CLIENT_RECORD_PRUNE_BATCH = 1000;
 	private static final List<EventRecord> RECORDS = new ArrayList<>();
 	private static final TraceStore TRACE_STORE = new TraceStore();
-	private static final Map<String, TickFilterBucket> TICK_FILTER_BUCKETS = new LinkedHashMap<>();
+	private static final TickFilterEngine<EventRecord> TICK_FILTER = new TickFilterEngine<>();
 	private static final Set<EventRecord> OLDER_HISTORY_RECORDS = Collections.newSetFromMap(new IdentityHashMap<>());
 	private static final Set<EventRecord> HISTORY_FILTERED_RECORDS = Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -65,6 +59,7 @@ public final class VisibleFunctionHud {
 		RECORDS.subList(0, overflow).clear();
 		for (EventRecord record : removed) {
 			TRACE_STORE.remove(record);
+			TICK_FILTER.removeRecord(record.id());
 			OLDER_HISTORY_RECORDS.remove(record);
 			HISTORY_FILTERED_RECORDS.remove(record);
 		}
@@ -137,9 +132,7 @@ public final class VisibleFunctionHud {
 	}
 
 	static boolean isTickFiltered(EventRecord record) {
-		return capturedBucket(commandBucketKey(record))
-			|| capturedBucket(functionBucketKey(record))
-			|| capturedBucket(eventBucketKey(record));
+		return TICK_FILTER.isCaptured(tickFilterInput(record));
 	}
 
 	static List<TickFilterBucket> tickFilterBuckets(TickBucketType type) {
@@ -147,35 +140,19 @@ public final class VisibleFunctionHud {
 	}
 
 	static List<TickFilterBucket> tickFilterBuckets(TickBucketType type, boolean active) {
-		List<TickFilterBucket> buckets = new ArrayList<>();
-
-		for (TickFilterBucket bucket : TICK_FILTER_BUCKETS.values()) {
-			if (bucket.type() == type && bucket.captured() && bucket.active() == active) {
-				buckets.add(bucket);
-			}
-		}
-
-		buckets.sort(Comparator
-			.comparingInt(TickFilterBucket::countLastSecond)
-			.reversed()
-			.thenComparing(Comparator.comparingLong(TickFilterBucket::lastSeenTick).reversed()));
-		return buckets;
+		TickFilterEngine.BucketType engineType = TickFilterEngine.BucketType.valueOf(type.name());
+		return TICK_FILTER.snapshots(engineType, active, currentTick()).stream()
+			.map(TickFilterBucket::new)
+			.toList();
 	}
 
 	static void clearInactiveTickFilterBuckets() {
-		TICK_FILTER_BUCKETS.entrySet().removeIf(entry -> entry.getValue().captured() && !entry.getValue().active());
+		TICK_FILTER.clearInactive(currentTick());
+		HISTORY_FILTERED_RECORDS.removeIf(record -> !TICK_FILTER.isCaptured(tickFilterInput(record)));
 	}
 
 	static int capturedTickFilterBucketCount() {
-		int count = 0;
-
-		for (TickFilterBucket bucket : TICK_FILTER_BUCKETS.values()) {
-			if (bucket.captured()) {
-				count++;
-			}
-		}
-
-		return count;
+		return TICK_FILTER.capturedCount();
 	}
 
 	static int configuredWidth() {
@@ -215,21 +192,8 @@ public final class VisibleFunctionHud {
 	}
 
 	static TickFilterBucket tickFilterBucketFor(EventRecord record) {
-		if (record.isEvent()) {
-			TickFilterBucket bucket = capturedTickFilterBucket(eventBucketKey(record));
-			if (bucket != null) {
-				return bucket;
-			}
-		}
-
-		if (record.isCommand()) {
-			TickFilterBucket bucket = capturedTickFilterBucket(commandBucketKey(record));
-			if (bucket != null) {
-				return bucket;
-			}
-		}
-
-		return capturedTickFilterBucket(functionBucketKey(record));
+		TickFilterEngine.Snapshot<EventRecord> snapshot = TICK_FILTER.bucketFor(tickFilterInput(record), currentTick());
+		return snapshot == null ? null : new TickFilterBucket(snapshot);
 	}
 
 	static DrawnWindow drawRecordWindow(
@@ -385,81 +349,56 @@ public final class VisibleFunctionHud {
 	}
 
 	private static boolean updateTickFilter(EventRecord record) {
-		long tick = toTick(record.timestampMillis());
-		boolean filtered = false;
-
-		if (record.isCommand()) {
-			filtered |= updateBucket(TickBucketType.COMMAND, commandBucketKey(record), record.subject(), record, tick);
-		}
-
-		if (record.isEvent()) {
-			filtered |= updateBucket(TickBucketType.EVENT, eventBucketKey(record), record.subject(), record, tick);
-		}
-
-		if (!"none".equals(record.commandContext().function())) {
-			filtered |= updateBucket(TickBucketType.FUNCTION, functionBucketKey(record), record.commandContext().function(), record, tick);
-		}
-
-		return filtered;
+		return TICK_FILTER.add(tickFilterInput(record));
 	}
 
-	private static boolean updateBucket(TickBucketType type, String key, String displayName, EventRecord record, long tick) {
-		if (key.isBlank()) {
-			return false;
-		}
-
-		TickFilterBucket bucket = TICK_FILTER_BUCKETS.computeIfAbsent(
-			key,
-			ignored -> new TickFilterBucket(key, type, displayName, tick, tick, record.commandContext().sourceSummary())
-		);
-		bucket.add(record, tick);
-		return bucket.active();
-	}
-
-	private static boolean activeBucket(String key) {
-		TickFilterBucket bucket = TICK_FILTER_BUCKETS.get(key);
-		return bucket != null && bucket.active();
-	}
-
-	private static boolean capturedBucket(String key) {
-		TickFilterBucket bucket = TICK_FILTER_BUCKETS.get(key);
-		return bucket != null && bucket.captured();
-	}
-
-	private static TickFilterBucket capturedTickFilterBucket(String key) {
-		TickFilterBucket bucket = TICK_FILTER_BUCKETS.get(key);
-		return bucket != null && bucket.captured() ? bucket : null;
-	}
-
-	private static String commandBucketKey(EventRecord record) {
-		if (!record.isCommand()) {
-			return "";
-		}
-
+	private static TickFilterEngine.Input<EventRecord> tickFilterInput(EventRecord record) {
 		CommandRef context = record.commandContext();
-		return "COMMAND:" + record.subject() + "|" + context.source() + "|" + context.function();
-	}
-
-	private static String functionBucketKey(EventRecord record) {
-		String function = record.commandContext().function();
-		return "none".equals(function) ? "" : "FUNCTION:" + function;
-	}
-
-	private static String eventBucketKey(EventRecord record) {
-		if (!record.isEvent()) {
-			return "";
-		}
-
-		return "EVENT:" + record.type() + "|" + record.subject() + "|" + record.commandContext().command();
+		long tick = recordTick(record);
+		String action = record.field("action");
+		return new TickFilterEngine.Input<>(
+			record.id(),
+			record.type(),
+			record.subject(),
+			action.isBlank() ? record.summary() : action,
+			context.command(),
+			context.commandId(),
+			context.source(),
+			context.function(),
+			context.sourceSummary(),
+			tick,
+			record.timestampMillis(),
+			"tick function".equals(context.source()) || isTickFunction(context.function()),
+			record
+		);
 	}
 
 	private static long toTick(long timestampMillis) {
 		return timestampMillis / TICK_MILLIS;
 	}
 
+	private static long recordTick(EventRecord record) {
+		String tick = record.field("tick");
+		if (!tick.isBlank()) {
+			try {
+				return Long.parseLong(tick);
+			} catch (NumberFormatException ignored) {
+			}
+		}
+		return toTick(record.timestampMillis());
+	}
+
+	private static long currentTick() {
+		Minecraft minecraft = Minecraft.getInstance();
+		return minecraft.level == null ? toTick(System.currentTimeMillis()) : minecraft.level.getGameTime();
+	}
+
 	private static boolean isTickFunction(String function) {
 		if (function == null || function.isBlank() || "none".equals(function)) {
 			return false;
+		}
+		if (DatapackTickFunctionIndex.isTickFunction(function)) {
+			return true;
 		}
 
 		int separator = function.indexOf(':');
@@ -734,108 +673,58 @@ public final class VisibleFunctionHud {
 	}
 
 	static final class TickFilterBucket {
-		private final String key;
-		private final TickBucketType type;
-		private final String displayName;
-		private final long firstSeenTick;
-		private final Deque<Long> recentTicks = new ArrayDeque<>();
-		private final List<EventRecord> sampleRecords = new ArrayList<>();
-		private long lastSeenTick;
-		private int totalCount;
-		private String sourceSummary;
-		private boolean highFrequency;
-		private boolean tickFunction;
+		private final TickFilterEngine.Snapshot<EventRecord> snapshot;
 
-		private TickFilterBucket(String key, TickBucketType type, String displayName, long firstSeenTick, long lastSeenTick, String sourceSummary) {
-			this.key = key;
-			this.type = type;
-			this.displayName = displayName;
-			this.firstSeenTick = firstSeenTick;
-			this.lastSeenTick = lastSeenTick;
-			this.sourceSummary = sourceSummary;
-		}
-
-		private void add(EventRecord record, long tick) {
-			totalCount++;
-			lastSeenTick = tick;
-			sourceSummary = record.commandContext().sourceSummary();
-			tickFunction = tickFunction || isTickFunction(record.commandContext().function());
-			recentTicks.addLast(tick);
-			pruneRecent(tick);
-
-			highFrequency = highFrequency || recentTicks.size() >= HIGH_FREQUENCY_THRESHOLD;
-
-			if (sampleRecords.size() >= MAX_SAMPLE_RECORDS) {
-				sampleRecords.removeFirst();
-			}
-			sampleRecords.add(record);
+		private TickFilterBucket(TickFilterEngine.Snapshot<EventRecord> snapshot) {
+			this.snapshot = snapshot;
 		}
 
 		String key() {
-			return key;
+			return snapshot.key();
 		}
 
 		TickBucketType type() {
-			return type;
+			return TickBucketType.valueOf(snapshot.type().name());
 		}
 
 		String displayName() {
-			return displayName;
+			return snapshot.displayName();
 		}
 
 		long firstSeenTick() {
-			return firstSeenTick;
+			return snapshot.firstSeenTick();
 		}
 
 		long lastSeenTick() {
-			return lastSeenTick;
+			return snapshot.lastSeenTick();
 		}
 
-		int totalCount() {
-			return totalCount;
+		long totalCount() {
+			return snapshot.totalCount();
 		}
 
 		int countLastSecond() {
-			pruneRecent(toTick(System.currentTimeMillis()));
-			return recentTicks.size();
+			return snapshot.countLastSecond();
 		}
 
 		String sourceSummary() {
-			return tickFunction ? "tick function" + ("unknown".equals(sourceSummary) ? "" : " " + sourceSummary.replaceFirst("^tick function ", "")) : sourceSummary;
+			return snapshot.sourceSummary();
 		}
 
 		List<EventRecord> sampleRecords() {
-			return List.copyOf(sampleRecords);
-		}
-
-		boolean captured() {
-			return highFrequency || tickFunction;
+			return snapshot.sampleRecords();
 		}
 
 		boolean active() {
-			return captured() && countLastSecond() > 0;
+			return snapshot.active();
 		}
 
 		String reason() {
-			if (tickFunction && highFrequency) {
-				return "tick function + high frequency";
-			}
-
-			if (tickFunction) {
-				return "tick function";
-			}
-
-			return "high frequency";
+			return snapshot.reason();
 		}
 
 		long millisSinceLastSeen() {
-			return Math.max(0, System.currentTimeMillis() - lastSeenTick * TICK_MILLIS);
-		}
-
-		private void pruneRecent(long tick) {
-			while (!recentTicks.isEmpty() && tick - recentTicks.peekFirst() > HIGH_FREQUENCY_WINDOW_TICKS) {
-				recentTicks.removeFirst();
-			}
+			return Math.max(0, currentTick() - snapshot.lastSeenTick()) * TICK_MILLIS;
 		}
 	}
 

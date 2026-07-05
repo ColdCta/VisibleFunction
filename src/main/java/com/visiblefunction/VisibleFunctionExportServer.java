@@ -46,6 +46,7 @@ final class VisibleFunctionExportServer {
 
 	private final Object recordsLock = new Object();
 	private final List<ExportRecord> records = new ArrayList<>();
+	private final TickFilterEngine<ExportRecord> tickFilterEngine = new TickFilterEngine<>();
 	private final List<SseClient> clients = new CopyOnWriteArrayList<>();
 	private final BlockingDeque<ExportRecord> pendingRecords = new LinkedBlockingDeque<>(MAX_PENDING_STREAM_RECORDS);
 	private final AtomicLong nextRecordId = new AtomicLong(1);
@@ -54,6 +55,7 @@ final class VisibleFunctionExportServer {
 	private volatile boolean running;
 	private volatile int port;
 	private volatile long sessionId;
+	private volatile long currentTick;
 	private Thread acceptThread;
 	private Thread broadcastThread;
 
@@ -72,9 +74,11 @@ final class VisibleFunctionExportServer {
 		stop();
 		synchronized (recordsLock) {
 			records.clear();
+			tickFilterEngine.clear();
 		}
 		nextRecordId.set(1);
 		sessionId = nextSessionId.getAndIncrement();
+		currentTick = 0;
 
 		try {
 			ServerSocket socket = new ServerSocket();
@@ -142,6 +146,9 @@ final class VisibleFunctionExportServer {
 		ExportRecord record = new ExportRecord(nextRecordId.getAndIncrement(), payload, System.currentTimeMillis(), sessionId);
 		synchronized (recordsLock) {
 			records.add(record);
+			TickFilterEngine.Input<ExportRecord> input = VisibleFunctionExportJson.tickFilterInput(record);
+			currentTick = Math.max(currentTick, input.tick());
+			tickFilterEngine.add(input);
 			pruneRetainedRecords();
 		}
 		offerPendingRecord(record);
@@ -153,7 +160,14 @@ final class VisibleFunctionExportServer {
 			return;
 		}
 
+		for (int index = 0; index < overflow; index++) {
+			tickFilterEngine.removeRecord(records.get(index).id());
+		}
 		records.subList(0, overflow).clear();
+	}
+
+	void tick(long gameTick) {
+		currentTick = gameTick;
 	}
 
 	private void offerPendingRecord(ExportRecord record) {
@@ -275,7 +289,12 @@ final class VisibleFunctionExportServer {
 	}
 
 	private String tickFilterResponse(String query) {
-		return VisibleFunctionExportJson.tickFilter(selectedRecords(query));
+		if (!query.isBlank()) {
+			return VisibleFunctionExportJson.tickFilter(selectedRecords(query));
+		}
+		synchronized (recordsLock) {
+			return VisibleFunctionExportJson.tickFilterSnapshots(tickFilterEngine.snapshots(currentTick));
+		}
 	}
 
 	private List<ExportRecord> selectedRecords(String query) {

@@ -114,6 +114,8 @@ The Export Server only listens on the local loopback address. It is not exposed 
 | `/visiblefunction recording stop`                   | Stop and save the recording                                     |
 | `/visiblefunction recording status`                 | Show recording status                                           |
 
+Status commands are readable by all players. Commands that change global state, start or stop Export/Recording, or change output settings require Minecraft's `COMMANDS_GAMEMASTER` permission.
+
 Current configuration is stored inside the running game instance and resets to default values after restart.
 
 ## Web API
@@ -149,7 +151,9 @@ After pressing `]` or running a recording command, VisibleFunction streams recor
 visiblefunction-recordings/
 ```
 
-When recording stops, it generates `visiblefunction-recording-<id>.json`. Recording files are not automatically committed to Git.
+While recording, records are appended to a bounded-memory NDJSON journal. Stopping publishes `visiblefunction-recording-<id>.json` with an atomic move where supported. IDs contain millisecond time plus an opaque suffix, so clients must treat them as strings rather than parse their format.
+
+If the game exits unexpectedly, VisibleFunction recovers complete journal entries on the next server start and marks the recording as `recovered`. Recording files are not automatically committed to Git.
 
 Recordings may contain:
 

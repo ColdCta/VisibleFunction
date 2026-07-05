@@ -91,6 +91,7 @@ export type RecordingMetadata = {
   file: string;
   records: number;
   format?: string;
+  recovered?: boolean;
 };
 
 export type RecordingPayload = {
@@ -347,9 +348,8 @@ export type TickFilterBucketPayload = {
 
 export type Mode = "live" | "recordings" | "replay" | "datapack";
 
-// Built client-side by buildTickFilterBands. Field names keep the `millis` suffix for legacy
-// compatibility but actually hold TICK values (see store/tickFilter.ts toBand), so they compose
-// with tick-based buckets.
+// Adapted from the canonical backend TickFilterBucket payload. The legacy `millis` names contain
+// tick coordinates in this view model so they compose with tick-based timeline buckets.
 export type TickFilterBand = {
   key: string;
   displayName: string;

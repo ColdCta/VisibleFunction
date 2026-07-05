@@ -44,6 +44,7 @@ public class VisibleFunction implements ModInitializer {
 		VisibleFunctionCommands.register(settings);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> sendWindowConfig(settings, handler.player));
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			VisibleFunctionRecordingManager.instance().recoverInterruptedRecordings();
 			DatapackTickFunctionIndex.rebuild(server);
 			DatapackAnalysisIndex.rebuild(server);
 			DatapackTriggerIndex.rebuild(server);
@@ -65,7 +66,10 @@ public class VisibleFunction implements ModInitializer {
 			VisibleFunctionRecordingManager.instance().stopIfActive();
 			VisibleFunctionExportServer.instance().stop();
 		});
-		ServerTickEvents.END_SERVER_TICK.register(CommandTraceContext::tick);
+		ServerTickEvents.END_SERVER_TICK.register(server -> {
+			CommandTraceContext.tick(server);
+			VisibleFunctionExportServer.instance().tick(server.overworld().getGameTime());
+		});
 
 		ServerEntityEvents.ALLOW_LOAD.register((entity, level, spawnReason, loadedFromDisk) -> {
 			EntitySpawnReason effectiveSpawnReason = VisibleFunctionSpawnSources.consume(entity.getUUID(), spawnReason);

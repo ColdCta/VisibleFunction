@@ -7,11 +7,13 @@ import type {
   RecordingStatus,
   Selection,
   TraceRecord,
+  TickFilterBucketPayload,
 } from "../api/types";
 import { DEFAULT_BASE_URL, VisibleFunctionClient, type StreamMessage } from "../api/visibleFunctionClient";
 import { buildIndexes, addToIndexes, type TraceIndexes } from "./traceIndexes";
 import { recordTick } from "./traceTime";
 import type { RelationshipGraphRequest } from "./relationshipGraph";
+import { BoundedBuffer } from "./boundedBuffer";
 
 const DEFAULT_VIEW_WINDOW_TICKS = 12 * 20; // ~12s at 20 TPS
 // Live retention is tick-based (not record-count-based) so the window stays a stable time span
@@ -32,6 +34,9 @@ const LIVE_WARMUP_RECORD_THRESHOLD = 2500;
 // 5000 records with a synchronous buildIndexes over all of them, which froze the UI on connect
 // (issue #2 of the second round). 200 is cheap to index and enough to prime the live view.
 const BACKFILL_LIMIT = 200;
+const RESUME_BACKFILL_LIMIT = 5000;
+const MAX_PENDING_RECORDS = 8192;
+const MAX_LIVE_RECORDS = 20000;
 
 export type SettingsState = {
   baseUrl: string;
@@ -93,6 +98,7 @@ type Store = {
   bucketTicks: number;
   autoScroll: boolean;
   recordingStatus: RecordingStatus | null;
+  tickFilterBuckets: TickFilterBucketPayload[];
   recordings: RecordingMetadata[];
   activeRecording: RecordingMetadata | null;
   liveSessionId: number | null;
@@ -105,7 +111,7 @@ type Store = {
   setDensity: (d: SettingsState["displayDensity"]) => void;
   setLiveRetention: (ticks: number) => void;
   setLiveBuffer: (ticks: number) => void;
-  connect: () => Promise<void>;
+  connect: (backfillLimit?: number) => Promise<void>;
   disconnect: () => void;
   togglePause: () => void;
   clear: () => void;
@@ -122,6 +128,7 @@ type Store = {
   loadRecording: (rec: RecordingMetadata) => Promise<void>;
   loadLatestRecording: () => Promise<void>;
   pollRecordingStatus: () => Promise<void>;
+  pollTickFilter: () => Promise<void>;
   setMode: (m: Mode) => void;
   ingestRecord: (r: TraceRecord) => void;
 };
@@ -134,6 +141,7 @@ let flushTimer: number | null = null;
 let liveWarmupTimer: number | null = null;
 let lastFlushTime = 0;
 const pendingIds = new Set<number>();
+const pendingBuffer = new BoundedBuffer<TraceRecord>(MAX_PENDING_RECORDS);
 const EMPTY_STATS: TraceStats = {
   recordCount: 0,
   commandCount: 0,
@@ -176,6 +184,7 @@ export const useTraceStore = create<Store>((set, get) => ({
   bucketTicks: 1,
   autoScroll: true,
   recordingStatus: null,
+  tickFilterBuckets: [],
   recordings: [],
   activeRecording: null,
   liveSessionId: null,
@@ -205,7 +214,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     set({ settings: { ...get().settings, liveBufferTicks: clamped } });
   },
 
-  async connect() {
+  async connect(backfillLimit = BACKFILL_LIMIT) {
     const { client } = get();
     get().disconnect();
     set({ connection: "connecting", mockMode: false, streamError: false });
@@ -233,8 +242,8 @@ export const useTraceStore = create<Store>((set, get) => ({
     // Initial backfill (docs :147). Capped at BACKFILL_LIMIT to avoid a synchronous indexing
     // storm on connect that froze the UI under high-throughput backends.
     try {
-      const back = await client.records({ limit: BACKFILL_LIMIT, tail: true });
-      const list = back.records ?? [];
+      const back = await client.records({ limit: Math.min(RESUME_BACKFILL_LIMIT, Math.max(1, backfillLimit)), tail: true });
+      const list = pruneLiveRecords(back.records ?? []);
       const range = computeRange(list);
       const node = traceNode(list, range, lastWindow(range));
       if (get().mode === "live") {
@@ -283,8 +292,10 @@ export const useTraceStore = create<Store>((set, get) => ({
 
     statusTimer = window.setInterval(() => {
       void get().pollRecordingStatus();
+      void get().pollTickFilter();
     }, 1000);
     void get().pollRecordingStatus();
+    void get().pollTickFilter();
   },
 
   disconnect() {
@@ -296,13 +307,18 @@ export const useTraceStore = create<Store>((set, get) => ({
     set({ connection: "disconnected" });
   },
 
-  togglePause() {
-    const next = !get().paused;
-    set({ paused: next });
-    // Resume flushes buffered records (docs :638).
-    if (!next && get().pendingRecords.length > 0) {
-      flushPending();
+  async togglePause() {
+    const state = get();
+    if (state.mode !== "live") return;
+    if (!state.paused) {
+      stopLiveStream();
+      clearPendingBuffer();
+      set({ paused: true, pendingRecords: [] });
+      return;
     }
+
+    set({ paused: false, connection: "connecting", pendingRecords: [] });
+    await get().connect(RESUME_BACKFILL_LIMIT);
   },
 
   clear() {
@@ -312,9 +328,11 @@ export const useTraceStore = create<Store>((set, get) => ({
       [nodeKey]: empty,
       ...empty,
       pendingRecords: [],
+      tickFilterBuckets: [],
       relationshipGraphRequest: null,
     });
     pendingIds.clear();
+    clearPendingBuffer();
   },
 
   setAutoScroll(v) {
@@ -379,7 +397,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     const shouldWarm =
       age > LIVE_WARMUP_AFTER_MS ||
       state.liveNode.records.length > LIVE_WARMUP_RECORD_THRESHOLD ||
-      state.pendingRecords.length > LIVE_WARMUP_RECORD_THRESHOLD;
+      pendingCount() > LIVE_WARMUP_RECORD_THRESHOLD;
     const livePatch = {
       mode: "live" as const,
       activeRecording: null,
@@ -415,6 +433,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       liveWarmupState: "idle",
     });
     pendingIds.clear();
+    clearPendingBuffer();
     if (!statusTimer) {
       statusTimer = window.setInterval(() => {
         void get().pollRecordingStatus();
@@ -472,9 +491,11 @@ export const useTraceStore = create<Store>((set, get) => ({
       autoScroll: false,
       paused: false,
       pendingRecords: [],
+      tickFilterBuckets: payload.data.tickFilter ?? [],
       relationshipGraphRequest: null,
     });
     pendingIds.clear();
+    clearPendingBuffer();
   },
 
   async loadLatestRecording() {
@@ -499,6 +520,17 @@ export const useTraceStore = create<Store>((set, get) => ({
     }
   },
 
+  async pollTickFilter() {
+    const state = get();
+    if (state.mockMode || state.mode !== "live" || state.paused) return;
+    try {
+      const response = await state.client.tickFilter();
+      set({ tickFilterBuckets: response.tickFilter ?? [] });
+    } catch {
+      /* keep the last canonical backend snapshot */
+    }
+  },
+
   setMode(m) {
     set({ mode: m });
   },
@@ -507,9 +539,10 @@ export const useTraceStore = create<Store>((set, get) => ({
     const cur = get();
     const liveIndexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
     if (liveIndexes.recordsById.has(r.id) || pendingIds.has(r.id)) return;
-    // Immutable update (the previous frontend mutated the array in place).
+    if (cur.paused) return;
     pendingIds.add(r.id);
-    set({ pendingRecords: [...cur.pendingRecords, r] });
+    const dropped = pendingBuffer.push(r);
+    if (dropped) pendingIds.delete(dropped.id);
     scheduleFlush();
   },
 }));
@@ -539,7 +572,7 @@ function scheduleLiveWarmupReady() {
     liveWarmupTimer = null;
     const state = useTraceStore.getState();
     if (state.mode !== "live") return;
-    if (!state.paused && state.pendingRecords.length > 0) {
+    if (!state.paused && pendingCount() > 0) {
       flushPending();
     }
     const latest = useTraceStore.getState();
@@ -576,12 +609,11 @@ function stopLiveStream() {
 function flushPending() {
   const cur = useTraceStore.getState();
   if (cur.paused) {
-    // Keep incoming records buffered so the visible timeline truly freezes (docs :637).
     return;
   }
   const baseRecords = cur.mode === "live" ? cur.records : cur.liveNode.records;
   const baseViewRange = cur.mode === "live" ? cur.viewRange : cur.liveNode.viewRange;
-  const pending = cur.pendingRecords;
+  const pending = drainPendingBuffer();
   // Pending records already passed dedup at ingest time (against base + pending). Concatenate.
   let merged = pending.length ? [...baseRecords, ...pending] : baseRecords;
 
@@ -632,6 +664,19 @@ function flushPending() {
   } else {
     useTraceStore.setState({ liveNode: node, pendingRecords: [] });
   }
+  pendingIds.clear();
+}
+
+function pendingCount(): number {
+  return pendingBuffer.size;
+}
+
+function drainPendingBuffer(): TraceRecord[] {
+  return pendingBuffer.drain();
+}
+
+function clearPendingBuffer() {
+  pendingBuffer.clear();
   pendingIds.clear();
 }
 
@@ -697,7 +742,10 @@ function pruneLiveRecords(records: TraceRecord[]): TraceRecord[] {
     if (t > latest) latest = t;
   }
   const cutoff = latest - keepTicks;
-  return records.filter((r) => recordTick(r) >= cutoff);
+  const retained = records.filter((r) => recordTick(r) >= cutoff);
+  return retained.length > MAX_LIVE_RECORDS
+    ? retained.slice(retained.length - MAX_LIVE_RECORDS)
+    : retained;
 }
 
 function computeRange(records: TraceRecord[]): { min: number; max: number } {
@@ -793,7 +841,9 @@ function sanitizeSelection(selection: Selection, indexes: TraceIndexes): Selecti
 }
 
 function lastWindow(range: { min: number; max: number }): { min: number; max: number } {
-  if (!range.min || !range.max) return { min: range.min, max: range.max };
+  if (!Number.isFinite(range.min) || !Number.isFinite(range.max) || range.max < range.min) {
+    return { min: range.min, max: range.max };
+  }
   const min = Math.max(range.min, range.max - DEFAULT_VIEW_WINDOW_TICKS);
   return { min, max: range.max };
 }
@@ -802,7 +852,14 @@ function clampViewRange(
   viewRange: { min: number; max: number },
   range: { min: number; max: number }
 ): { min: number; max: number } {
-  if (!range.min || !range.max || !viewRange.min || !viewRange.max) {
+  if (
+    !Number.isFinite(range.min) ||
+    !Number.isFinite(range.max) ||
+    !Number.isFinite(viewRange.min) ||
+    !Number.isFinite(viewRange.max) ||
+    range.max < range.min ||
+    viewRange.max < viewRange.min
+  ) {
     return lastWindow(range);
   }
   const span = Math.min(DEFAULT_VIEW_WINDOW_TICKS, Math.max(1, viewRange.max - viewRange.min));
@@ -823,7 +880,9 @@ function clampViewRange(
 }
 
 function firstWindow(range: { min: number; max: number }): { min: number; max: number } {
-  if (!range.min || !range.max) return { min: range.min, max: range.max };
+  if (!Number.isFinite(range.min) || !Number.isFinite(range.max) || range.max < range.min) {
+    return { min: range.min, max: range.max };
+  }
   return { min: range.min, max: Math.min(range.max, range.min + DEFAULT_VIEW_WINDOW_TICKS) };
 }
 
@@ -845,8 +904,10 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     liveSessionId: sessionId,
     liveNode: empty,
     pendingRecords: [],
+    tickFilterBuckets: [],
     relationshipGraphRequest: null,
     ...(state.mode === "live" ? empty : {}),
   });
   pendingIds.clear();
+  clearPendingBuffer();
 }
