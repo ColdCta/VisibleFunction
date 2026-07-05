@@ -14,9 +14,33 @@
   overflow-x: auto;
 }
 
+/* No item selected: drop the inspector column and give the space to the timeline. */
+.shell__body--no-detail {
+  grid-template-columns: minmax(260px, 300px) minmax(560px, 1fr);
+}
+
 .shell__body--datapack {
   display: block;
   overflow: hidden;
+}
+
+/* Below the three-pane minimum the inspector would otherwise be pushed off-screen behind a
+   horizontal scroll. Collapse the body to two columns and float the inspector as a right-side
+   sheet over the timeline instead; Esc / the header close button dismiss it. */
+@media (max-width: 1180px) {
+  .shell__body,
+  .shell__body--no-detail {
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  }
+  .shell__body .detail {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(400px, 90vw);
+    z-index: 50;
+    box-shadow: -10px 0 30px rgba(0, 0, 0, 0.45);
+  }
 }
 
 /* === TopBar === */
@@ -208,6 +232,32 @@
 }
 
 .panel__icon { font-size: 12px; }
+
+.panel--collapsed .panel__title { margin-bottom: 0; }
+.panel__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.panel__toggle:hover { border: 0; color: var(--text); }
+.panel__chevron {
+  width: 10px;
+  font-size: 9px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+.panel__label { flex: 1 1 auto; text-align: left; }
+.panel__content { margin-top: 2px; }
 
 .kv {
   display: grid;
