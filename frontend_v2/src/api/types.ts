@@ -57,29 +57,50 @@ export type RecordingStatus = {
   active: string;
   activeId: string;
   activeRecords: string;
+  activeBytes?: string;
   directory?: string;
   activeFile?: string;
   completed: string;
   latest: string;
+  lastStopReason?: string;
+  maxBytes?: string;
+  maxDurationMillis?: string;
+  maxFiles?: string;
+  maxTotalBytes?: string;
+  minFreeBytes?: string;
 };
 
 export function normalizeRecordingStatus(s: RecordingStatus): {
   active: boolean;
   activeId: string;
   activeRecords: number;
+  activeBytes: number;
   directory: string;
   activeFile: string;
   completed: number;
   latest: string;
+  lastStopReason: string;
+  maxBytes: number;
+  maxDurationMillis: number;
+  maxFiles: number;
+  maxTotalBytes: number;
+  minFreeBytes: number;
 } {
   return {
     active: s.active === "true",
     activeId: s.activeId,
     activeRecords: Number(s.activeRecords || 0),
+    activeBytes: Number(s.activeBytes || 0),
     directory: s.directory ?? "",
     activeFile: s.activeFile ?? "none",
     completed: Number(s.completed || 0),
     latest: s.latest,
+    lastStopReason: s.lastStopReason ?? "none",
+    maxBytes: Number(s.maxBytes || 0),
+    maxDurationMillis: Number(s.maxDurationMillis || 0),
+    maxFiles: Number(s.maxFiles || 0),
+    maxTotalBytes: Number(s.maxTotalBytes || 0),
+    minFreeBytes: Number(s.minFreeBytes || 0),
   };
 }
 
@@ -92,6 +113,7 @@ export type RecordingMetadata = {
   records: number;
   format?: string;
   recovered?: boolean;
+  stopReason?: string;
 };
 
 export type RecordingPayload = {

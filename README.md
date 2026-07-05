@@ -151,9 +151,21 @@ After pressing `]` or running a recording command, VisibleFunction streams recor
 visiblefunction-recordings/
 ```
 
-While recording, records are appended to a bounded-memory NDJSON journal. Stopping publishes `visiblefunction-recording-<id>.json` with an atomic move where supported. IDs contain millisecond time plus an opaque suffix, so clients must treat them as strings rather than parse their format.
+While recording, records are appended directly to a recoverable JSON journal. Stopping appends the final metadata and atomically renames that same file to `visiblefunction-recording-<id>.json`; it does not create a second full-size `.json.part`. IDs contain millisecond time plus an opaque suffix, so clients must treat them as strings rather than parse their format.
 
 If the game exits unexpectedly, VisibleFunction recovers complete journal entries on the next server start and marks the recording as `recovered`. Recording files are not automatically committed to Git.
+
+Default safety limits:
+
+| Limit | Default | JVM system property |
+| --- | ---: | --- |
+| One recording | 1 GiB | `visiblefunction.recording.maxBytes` |
+| Recording duration | 2 hours | `visiblefunction.recording.maxDurationMillis` |
+| Managed recording files | 100 | `visiblefunction.recording.maxFiles` |
+| Recording directory | 10 GiB | `visiblefunction.recording.maxTotalBytes` |
+| Reserved free disk space | 1 GiB | `visiblefunction.recording.minFreeBytes` |
+
+Starting is refused when the file-count, directory-size, or free-space limits are already reached. File and directory quotas include interrupted journals, so repeated crashes cannot bypass them. A running recording safely stops before crossing its size, duration, total-directory, or free-space limit. Existing recordings are never deleted automatically.
 
 Recordings may contain:
 
@@ -208,7 +220,7 @@ docs/           API and frontend integration documentation
 * Only common datapack command events are currently covered. Not all game events are listened to.
 * Static datapack analysis uses a lightweight command parser designed for debugging. It is not a complete Brigadier AST.
 * The Export Server has no authentication because it only binds to `127.0.0.1`.
-* Very long recordings will continue to use disk space. Users need to clean up recording files manually after use.
+* Recording limits prevent unbounded disk growth, but users still need to remove old files manually after reaching the configured file-count or directory-size limit.
 
 ## License
 

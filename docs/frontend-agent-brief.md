@@ -186,10 +186,17 @@ Status response:
   "active": "false",
   "activeId": "none",
   "activeRecords": "0",
+  "activeBytes": "0",
   "directory": "C:\\path\\to\\game\\visiblefunction-recordings",
   "activeFile": "none",
   "completed": "1",
-  "latest": "20260624-153012-123-a1b2c3d4"
+  "latest": "20260624-153012-123-a1b2c3d4",
+  "lastStopReason": "manual",
+  "maxBytes": "1073741824",
+  "maxDurationMillis": "7200000",
+  "maxFiles": "100",
+  "maxTotalBytes": "10737418240",
+  "minFreeBytes": "1073741824"
 }
 ```
 
@@ -205,7 +212,8 @@ Metadata response:
       "durationMillis": 8000,
       "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012-123-a1b2c3d4.json",
       "records": 128,
-      "recovered": false
+      "recovered": false,
+      "stopReason": "manual"
     }
   ]
 }
@@ -222,8 +230,9 @@ Latest or specific recording response:
     "durationMillis": 8000,
     "file": "visiblefunction-recordings/visiblefunction-recording-20260624-153012-123-a1b2c3d4.json",
     "records": 128,
-    "format": "records-v2",
-    "recovered": false
+    "format": "records-v3",
+    "recovered": false,
+    "stopReason": "manual"
   },
   "records": [
     {
@@ -248,7 +257,7 @@ Latest or specific recording response:
 }
 ```
 
-Recording IDs are opaque. Do not derive timestamps by splitting the ID. `recovered: true` means the backend rebuilt the file from a journal left by an interrupted game process.
+Recording IDs are opaque. Do not derive timestamps by splitting the ID. `recovered: true` means the backend rebuilt the file from a journal left by an interrupted game process. `stopReason` may be `manual`, `server_stopping`, `file_size_limit`, `duration_limit`, `directory_size_limit`, `low_disk_space`, or a recovery reason.
 
 Use recordings for the main WebView replay/export workflow.
 Prefer top-level `records` when present. Fall back to `data.commands/events/functions/other` for older recording files.

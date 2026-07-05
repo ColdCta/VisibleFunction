@@ -3,8 +3,10 @@ package com.visiblefunction;
 import com.google.gson.JsonParser;
 import com.visiblefunction.VisibleFunctionExportJson.ExportRecord;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.channels.FileChannel;
@@ -33,25 +35,55 @@ import java.util.regex.Pattern;
 final class VisibleFunctionRecordingManager {
 	private static final DateTimeFormatter FILE_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
 	private static final Pattern SAFE_RECORDING_ID = Pattern.compile("[A-Za-z0-9._-]+");
-	private static final String JOURNAL_FORMAT = "visiblefunction-recording-journal-v2";
-	private static final int RECORDING_FLUSH_INTERVAL = 256;
+	private static final String JOURNAL_FORMAT_V2 = "visiblefunction-recording-journal-v2";
+	private static final String JOURNAL_FORMAT_V3 = "visiblefunction-recording-journal-v3";
+	private static final int RECORDING_FLUSH_INTERVAL = 64;
+	private static final long DISK_CHECK_INTERVAL_BYTES = 1024L * 1024;
+	private static final long FOOTER_RESERVE_BYTES = 16L * 1024 * 1024;
+	private static final int RECORDING_TICK_FILTER_IDS_PER_BUCKET = 8;
+	private static final int RECORDING_TICK_FILTER_SAMPLES_PER_BUCKET = 0;
+	private static final RecordingLimits DEFAULT_LIMITS = defaultLimits();
 	private static final VisibleFunctionRecordingManager INSTANCE = new VisibleFunctionRecordingManager(
 		Path.of("visiblefunction-recordings"),
 		Clock.systemDefaultZone(),
-		() -> UUID.randomUUID().toString().substring(0, 8)
+		() -> UUID.randomUUID().toString().substring(0, 8),
+		DEFAULT_LIMITS,
+		path -> Files.getFileStore(path).getUsableSpace()
 	);
 
 	private final Path recordingDir;
 	private final Clock clock;
 	private final Supplier<String> uniqueSuffix;
+	private final RecordingLimits limits;
+	private final UsableSpaceProbe usableSpaceProbe;
 	private final AtomicLong nextRecordId = new AtomicLong(1);
 	private final List<CompletedRecording> completedRecordings = new ArrayList<>();
 	private RecordingSession activeSession;
+	private String lastStopReason = "none";
+	private long lastPeriodicLimitCheckMillis;
 
 	VisibleFunctionRecordingManager(Path recordingDir, Clock clock, Supplier<String> uniqueSuffix) {
+		this(
+			recordingDir,
+			clock,
+			uniqueSuffix,
+			DEFAULT_LIMITS,
+			path -> Files.getFileStore(path).getUsableSpace()
+		);
+	}
+
+	VisibleFunctionRecordingManager(
+		Path recordingDir,
+		Clock clock,
+		Supplier<String> uniqueSuffix,
+		RecordingLimits limits,
+		UsableSpaceProbe usableSpaceProbe
+	) {
 		this.recordingDir = recordingDir;
 		this.clock = clock;
 		this.uniqueSuffix = uniqueSuffix;
+		this.limits = limits.validated();
+		this.usableSpaceProbe = usableSpaceProbe;
 	}
 
 	static VisibleFunctionRecordingManager instance() {
@@ -69,17 +101,40 @@ final class VisibleFunctionRecordingManager {
 
 		try {
 			Files.createDirectories(recordingDir);
-			activeSession = createSession();
+			DirectoryStats stats = directoryStats();
+			String rejection = startRejection(stats);
+			if (rejection != null) {
+				lastStopReason = rejection;
+				return new RecordingResult(false, "VisibleFunction recording refused: " + rejection);
+			}
+			activeSession = createSession(stats.totalBytes());
 		} catch (IOException exception) {
 			VisibleFunction.LOGGER.error("Failed to start VisibleFunction recording", exception);
+			lastStopReason = "io_error";
 			return new RecordingResult(false, "VisibleFunction recording failed to start: " + exception.getMessage());
 		}
 
 		nextRecordId.set(1);
+		lastStopReason = "recording";
+		lastPeriodicLimitCheckMillis = clock.millis();
 		return new RecordingResult(true, "VisibleFunction recording started: " + activeSession.id());
 	}
 
-	private RecordingSession createSession() throws IOException {
+	private String startRejection(DirectoryStats stats) throws IOException {
+		if (stats.fileCount() >= limits.maxFiles()) {
+			return "file_count_limit";
+		}
+		if (saturatedAdd(stats.totalBytes(), FOOTER_RESERVE_BYTES) > limits.maxTotalBytes()) {
+			return "directory_size_limit";
+		}
+		long usable = usableSpaceProbe.usableSpace(recordingDir);
+		if (usable < saturatedAdd(limits.minFreeBytes(), FOOTER_RESERVE_BYTES)) {
+			return "low_disk_space";
+		}
+		return null;
+	}
+
+	private RecordingSession createSession(long completedBytes) throws IOException {
 		long startedAtMillis = clock.millis();
 		String timestamp = FILE_TIME_FORMAT.format(LocalDateTime.ofInstant(
 			Instant.ofEpochMilli(startedAtMillis),
@@ -90,26 +145,22 @@ final class VisibleFunctionRecordingManager {
 			String suffix = sanitizeSuffix(uniqueSuffix.get());
 			String id = timestamp + "-" + suffix + (attempt == 0 ? "" : "-" + attempt);
 			Path journal = recordingJournalFile(id);
-			if (Files.exists(recordingFile(id)) || Files.exists(recordingStagingFile(id))) {
+			if (Files.exists(recordingFilePath(id))) {
 				continue;
 			}
 			try {
-				BufferedWriter writer = Files.newBufferedWriter(
+				OutputStream output = new BufferedOutputStream(Files.newOutputStream(
 					journal,
-					StandardCharsets.UTF_8,
 					StandardOpenOption.CREATE_NEW,
 					StandardOpenOption.WRITE
-				);
-				RecordingSession session = new RecordingSession(id, startedAtMillis, journal, writer);
-				writer.write(journalHeader(session));
-				writer.newLine();
-				writer.flush();
+				));
+				RecordingSession session = new RecordingSession(id, startedAtMillis, journal, output, completedBytes);
+				session.writeHeader();
 				return session;
 			} catch (FileAlreadyExistsException ignored) {
-				// Generate another opaque suffix without ever replacing an existing recording.
+				// Generate another opaque suffix without replacing an existing recording.
 			}
 		}
-
 		throw new IOException("Could not allocate a unique recording id");
 	}
 
@@ -117,24 +168,31 @@ final class VisibleFunctionRecordingManager {
 		if (activeSession == null) {
 			return new RecordingResult(false, "VisibleFunction recording is not active.");
 		}
+		return finishActive("manual");
+	}
 
+	private RecordingResult finishActive(String stopReason) {
 		RecordingSession session = activeSession;
 		activeSession = null;
-		long endedAtMillis = clock.millis();
+		if (session == null) {
+			return new RecordingResult(false, "VisibleFunction recording is not active.");
+		}
 
 		try {
 			session.close();
-			CompletedRecording completed = finalizeJournal(
-				session.id(),
-				session.startedAtMillis(),
-				endedAtMillis,
+			CompletedRecording completed = finalizeV3Journal(
 				session.journalFile(),
-				false
+				clock.millis(),
+				false,
+				stopReason,
+				session.scan()
 			);
 			completedRecordings.add(completed);
+			lastStopReason = stopReason;
 			return new RecordingResult(true, "VisibleFunction recording saved: " + absolutePath(completed.file()));
 		} catch (IOException exception) {
-			VisibleFunction.LOGGER.error("Failed to write VisibleFunction recording {}", session.id(), exception);
+			VisibleFunction.LOGGER.error("Failed to finalize VisibleFunction recording {}", session.id(), exception);
+			lastStopReason = "io_error";
 			return new RecordingResult(false, "VisibleFunction recording failed to save: " + exception.getMessage());
 		}
 	}
@@ -145,7 +203,42 @@ final class VisibleFunctionRecordingManager {
 
 	synchronized void stopIfActive() {
 		if (activeSession != null) {
-			stop();
+			finishActive("server_stopping");
+		}
+	}
+
+	synchronized void tick() {
+		RecordingSession session = activeSession;
+		if (session == null) {
+			return;
+		}
+		long now = clock.millis();
+		if (now - session.startedAtMillis() >= limits.maxDurationMillis()) {
+			finishActive("duration_limit");
+			return;
+		}
+		if (now - lastPeriodicLimitCheckMillis < 1000) {
+			return;
+		}
+		lastPeriodicLimitCheckMillis = now;
+		try {
+			DirectoryStats stats = directoryStats();
+			long trackedSessionTotal = saturatedAdd(session.completedBytesAtStart(), session.bytesWritten());
+			long projectedTotal = saturatedAdd(
+				Math.max(stats.totalBytes(), trackedSessionTotal),
+				FOOTER_RESERVE_BYTES
+			);
+			if (stats.fileCount() > limits.maxFiles()) {
+				finishActive("file_count_limit");
+			} else if (projectedTotal > limits.maxTotalBytes()) {
+				finishActive("directory_size_limit");
+			} else if (usableSpaceProbe.usableSpace(recordingDir)
+				< saturatedAdd(limits.minFreeBytes(), FOOTER_RESERVE_BYTES)) {
+				finishActive("low_disk_space");
+			}
+		} catch (IOException exception) {
+			VisibleFunction.LOGGER.warn("VisibleFunction recording limit check failed; stopping recording safely", exception);
+			finishActive("disk_check_failed");
 		}
 	}
 
@@ -165,53 +258,97 @@ final class VisibleFunctionRecordingManager {
 
 	private void recoverJournal(Path journal) {
 		try {
-			String header;
-			try (BufferedReader reader = Files.newBufferedReader(journal, StandardCharsets.UTF_8)) {
-				header = reader.readLine();
-			}
-			JournalMetadata metadata = parseJournalHeader(header, journal);
-			if (metadata == null) {
-				VisibleFunction.LOGGER.warn("Ignoring invalid VisibleFunction recording journal {}", journal);
-				return;
-			}
-			if (Files.exists(recordingFile(metadata.id()))) {
-				Files.deleteIfExists(journal);
+			String header = firstLine(journal);
+			if (isV3Header(header)) {
+				JournalScan scan = scanV3Journal(journal);
+				if (Files.exists(recordingFilePath(scan.metadata().id()))) {
+					Files.deleteIfExists(journal);
+					return;
+				}
+				CompletedRecording completed = finalizeV3Journal(
+					journal,
+					Math.max(scan.metadata().startedAtMillis(), Files.getLastModifiedTime(journal).toMillis()),
+					true,
+					"recovered_after_interruption"
+				);
+				completedRecordings.add(completed);
+				VisibleFunction.LOGGER.info("Recovered interrupted VisibleFunction recording {}", completed.id());
 				return;
 			}
 
-			long endedAtMillis = Math.max(metadata.startedAtMillis(), Files.getLastModifiedTime(journal).toMillis());
-			CompletedRecording completed = finalizeJournal(
-				metadata.id(),
-				metadata.startedAtMillis(),
-				endedAtMillis,
-				journal,
-				true
-			);
-			completedRecordings.add(completed);
-			VisibleFunction.LOGGER.info("Recovered interrupted VisibleFunction recording {}", metadata.id());
+			JournalMetadata legacy = parseV2JournalHeader(header, journal);
+			if (legacy != null) {
+				CompletedRecording completed = finalizeLegacyV2Journal(
+					legacy,
+					journal,
+					Math.max(legacy.startedAtMillis(), Files.getLastModifiedTime(journal).toMillis())
+				);
+				completedRecordings.add(completed);
+				VisibleFunction.LOGGER.info("Recovered legacy VisibleFunction recording {}", completed.id());
+				return;
+			}
+			VisibleFunction.LOGGER.warn("Ignoring invalid VisibleFunction recording journal {}", journal);
 		} catch (IOException exception) {
 			VisibleFunction.LOGGER.warn("Failed to recover VisibleFunction recording journal {}", journal, exception);
 		}
 	}
 
 	synchronized void publish(VisibleFunctionEventPayload payload) {
-		if (activeSession == null) {
+		RecordingSession session = activeSession;
+		if (session == null) {
 			return;
 		}
 
+		long now = clock.millis();
 		ExportRecord record = new ExportRecord(
 			nextRecordId.getAndIncrement(),
 			payload,
-			clock.millis(),
+			now,
 			VisibleFunctionExportServer.instance().sessionId()
 		);
+		byte[] encoded = session.encodeRecord(record);
 		try {
-			activeSession.append(record);
+			String limitReason = limitReason(session, encoded.length, now);
+			if (limitReason != null) {
+				RecordingResult result = finishActive(limitReason);
+				VisibleFunction.LOGGER.warn("{}; the current record was not written. {}", limitReason, result.message());
+				return;
+			}
+			session.append(record, encoded);
 		} catch (IOException exception) {
-			VisibleFunction.LOGGER.error("VisibleFunction recording {} stopped after write failure", activeSession.id(), exception);
-			activeSession.closeQuietly();
+			VisibleFunction.LOGGER.error("VisibleFunction recording {} stopped after write failure", session.id(), exception);
+			session.closeQuietly();
 			activeSession = null;
+			lastStopReason = "io_error";
 		}
+	}
+
+	private String limitReason(RecordingSession session, int recordBytes, long now) throws IOException {
+		if (now - session.startedAtMillis() >= limits.maxDurationMillis()) {
+			return "duration_limit";
+		}
+		long projected = saturatedAdd(
+			saturatedAdd(session.bytesWritten(), recordBytes),
+			FOOTER_RESERVE_BYTES
+		);
+		if (projected > limits.maxBytes()) {
+			return "file_size_limit";
+		}
+		if (saturatedAdd(session.completedBytesAtStart(), projected) > limits.maxTotalBytes()) {
+			return "directory_size_limit";
+		}
+		if (session.shouldCheckDisk(recordBytes)) {
+			long usable = usableSpaceProbe.usableSpace(recordingDir);
+			long required = saturatedAdd(
+				limits.minFreeBytes(),
+				saturatedAdd(recordBytes, FOOTER_RESERVE_BYTES)
+			);
+			if (usable < required) {
+				return "low_disk_space";
+			}
+			session.markDiskChecked();
+		}
+		return null;
 	}
 
 	synchronized String statusJson() {
@@ -220,10 +357,17 @@ final class VisibleFunctionRecordingManager {
 		values.put("active", Boolean.toString(activeSession != null));
 		values.put("activeId", activeSession == null ? "none" : activeSession.id());
 		values.put("activeRecords", Integer.toString(activeSession == null ? 0 : activeSession.recordCount()));
+		values.put("activeBytes", Long.toString(activeSession == null ? 0 : activeSession.bytesWritten()));
 		values.put("directory", absolutePath(recordingDir));
 		values.put("activeFile", activeSession == null ? "none" : absolutePath(activeSession.journalFile()));
 		values.put("completed", Integer.toString(known.size()));
 		values.put("latest", known.isEmpty() ? "none" : known.getLast().id());
+		values.put("lastStopReason", lastStopReason);
+		values.put("maxBytes", Long.toString(limits.maxBytes()));
+		values.put("maxDurationMillis", Long.toString(limits.maxDurationMillis()));
+		values.put("maxFiles", Integer.toString(limits.maxFiles()));
+		values.put("maxTotalBytes", Long.toString(limits.maxTotalBytes()));
+		values.put("minFreeBytes", Long.toString(limits.minFreeBytes()));
 		return VisibleFunctionExportJson.simpleObject(values);
 	}
 
@@ -246,47 +390,132 @@ final class VisibleFunctionRecordingManager {
 		return known.isEmpty() ? "{\"recording\":null}" : recordingJson(known.getLast().id());
 	}
 
-	synchronized String recordingJson(String id) {
+	synchronized Path latestRecordingFile() {
+		List<CompletedRecording> known = knownRecordings();
+		return known.isEmpty() ? null : readableRecordingFile(known.getLast().file());
+	}
+
+	synchronized Path findRecordingFile(String id) {
 		if (!isSafeRecordingId(id)) {
-			return "{\"recording\":null}";
+			return null;
 		}
 		for (CompletedRecording recording : completedRecordings) {
 			if (recording.id().equals(id)) {
-				return readRecordingFile(recording.file(), id);
+				return readableRecordingFile(recording.file());
 			}
 		}
-
-		Path file = findRecordingFile(id);
-		return file != null && Files.isRegularFile(file)
-			? readRecordingFile(file, id)
-			: "{\"recording\":null}";
+		return readableRecordingFile(recordingFilePath(id));
 	}
 
-	private CompletedRecording finalizeJournal(
-		String id,
-		long startedAtMillis,
-		long endedAtMillis,
+	synchronized String recordingJson(String id) {
+		Path file = findRecordingFile(id);
+		return file == null ? "{\"recording\":null}" : readRecordingFile(file, id);
+	}
+
+	private CompletedRecording finalizeV3Journal(
 		Path journal,
-		boolean recovered
+		long endedAtMillis,
+		boolean recovered,
+		String stopReason
 	) throws IOException {
-		Path file = recordingFile(id);
-		Path staging = recordingStagingFile(id);
+		return finalizeV3Journal(journal, endedAtMillis, recovered, stopReason, scanV3Journal(journal));
+	}
+
+	private CompletedRecording finalizeV3Journal(
+		Path journal,
+		long endedAtMillis,
+		boolean recovered,
+		String stopReason,
+		JournalScan scan
+	) throws IOException {
+		JournalMetadata metadata = scan.metadata();
+		Path file = recordingFilePath(metadata.id());
 		if (Files.exists(file)) {
 			throw new FileAlreadyExistsException(file.toString());
 		}
+
+		try (FileChannel channel = FileChannel.open(journal, StandardOpenOption.WRITE)) {
+			channel.truncate(scan.lastGoodOffset());
+			channel.force(true);
+		}
+
+		String footer = recordingFooter(
+			metadata,
+			endedAtMillis,
+			file,
+			scan.records(),
+			recovered,
+			stopReason,
+			scan.tickFilter()
+		);
+		byte[] footerBytes = footer.getBytes(StandardCharsets.UTF_8);
+		if (footerBytes.length > FOOTER_RESERVE_BYTES
+			|| saturatedAdd(scan.lastGoodOffset(), footerBytes.length) > limits.maxBytes()) {
+			footer = recordingFooter(metadata, endedAtMillis, file, scan.records(), recovered, stopReason, List.of());
+			footerBytes = footer.getBytes(StandardCharsets.UTF_8);
+		}
+		long usable = usableSpaceProbe.usableSpace(recordingDir);
+		if (usable < saturatedAdd(limits.minFreeBytes(), footerBytes.length)) {
+			footer = recordingFooter(metadata, endedAtMillis, file, scan.records(), recovered, stopReason, List.of());
+			footerBytes = footer.getBytes(StandardCharsets.UTF_8);
+		}
+		if (usable < saturatedAdd(limits.minFreeBytes(), footerBytes.length)) {
+			throw new IOException("Insufficient free disk space to finalize recording " + metadata.id());
+		}
+
+		try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(journal, StandardOpenOption.APPEND))) {
+			output.write(footerBytes);
+			output.flush();
+		}
+		force(journal);
+		movePublished(journal, file);
+		return new CompletedRecording(
+			metadata.id(),
+			metadata.startedAtMillis(),
+			endedAtMillis,
+			file,
+			scan.records(),
+			recovered,
+			stopReason
+		);
+	}
+
+	private CompletedRecording finalizeLegacyV2Journal(
+		JournalMetadata metadata,
+		Path journal,
+		long endedAtMillis
+	) throws IOException {
+		Path file = recordingFilePath(metadata.id());
+		Path staging = recordingDir.resolve("visiblefunction-recording-" + metadata.id() + ".legacy-recovery.part");
+		if (Files.exists(file)) {
+			Files.deleteIfExists(journal);
+			return metadataFromFile(file);
+		}
 		Files.deleteIfExists(staging);
 
-		JournalScan scan = scanJournal(journal);
+		JournalScan scan = scanV2Journal(journal, metadata);
+		long journalBytes = Files.size(journal);
+		long recoverySpace = saturatedAdd(
+			limits.minFreeBytes(),
+			saturatedAdd(journalBytes, FOOTER_RESERVE_BYTES)
+		);
+		if (usableSpaceProbe.usableSpace(recordingDir) < recoverySpace) {
+			throw new IOException("Insufficient free disk space to recover legacy recording " + metadata.id());
+		}
 		try (
 			BufferedReader reader = Files.newBufferedReader(journal, StandardCharsets.UTF_8);
-			OutputStream output = Files.newOutputStream(staging, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+			OutputStream output = new BufferedOutputStream(Files.newOutputStream(
+				staging,
+				StandardOpenOption.CREATE_NEW,
+				StandardOpenOption.WRITE
+			))
 		) {
 			reader.readLine();
-			writeUtf8(output, recordingHeader(id, startedAtMillis, endedAtMillis, file, recovered, scan.records()));
+			writeUtf8(output, "{\"records\":[");
 			boolean first = true;
 			String line;
 			while ((line = reader.readLine()) != null) {
-				if (line.isBlank() || !isValidRecord(line)) {
+				if (line.isBlank() || parseRecord(line) == null) {
 					continue;
 				}
 				if (!first) {
@@ -295,19 +524,85 @@ final class VisibleFunctionRecordingManager {
 				writeUtf8(output, line);
 				first = false;
 			}
-			writeUtf8(output, recordingFooter(scan.records(), scan.tickFilter()));
+			writeUtf8(output, recordingFooter(
+				metadata,
+				endedAtMillis,
+				file,
+				scan.records(),
+				true,
+				"recovered_legacy_journal",
+				scan.tickFilter()
+			));
 		}
-
-		try (FileChannel channel = FileChannel.open(staging, StandardOpenOption.WRITE)) {
-			channel.force(true);
-		}
+		force(staging);
 		movePublished(staging, file);
 		Files.deleteIfExists(journal);
-		return new CompletedRecording(id, startedAtMillis, endedAtMillis, file, scan.records(), recovered);
+		return new CompletedRecording(
+			metadata.id(),
+			metadata.startedAtMillis(),
+			endedAtMillis,
+			file,
+			scan.records(),
+			true,
+			"recovered_legacy_journal"
+		);
 	}
 
-	private static JournalScan scanJournal(Path journal) throws IOException {
-		TickFilterEngine<ExportRecord> engine = new TickFilterEngine<>();
+	private static JournalScan scanV3Journal(Path journal) throws IOException {
+		TickFilterEngine<ExportRecord> engine = recordingTickFilter();
+		ByteArrayOutputStream line = new ByteArrayOutputStream(8192);
+		byte[] buffer = new byte[64 * 1024];
+		long offset = 0;
+		long lastGoodOffset = 0;
+		int records = 0;
+		long currentTick = 0;
+		JournalMetadata metadata = null;
+		boolean invalid = false;
+
+		try (BufferedInputStream input = new BufferedInputStream(Files.newInputStream(journal))) {
+			int read;
+			while (!invalid && (read = input.read(buffer)) >= 0) {
+				for (int index = 0; index < read; index++) {
+					byte value = buffer[index];
+					offset++;
+					if (value != '\n') {
+						line.write(value);
+						continue;
+					}
+
+					String text = line.toString(StandardCharsets.UTF_8);
+					line.reset();
+					if (metadata == null) {
+						metadata = parseV3JournalHeader(text, journal);
+						if (metadata == null) {
+							throw new IOException("Invalid v3 recording journal header: " + journal);
+						}
+						lastGoodOffset = offset;
+						continue;
+					}
+					String recordText = text.startsWith(",") ? text.substring(1) : text;
+					ExportRecord record = parseRecord(recordText);
+					if (record == null) {
+						invalid = true;
+						break;
+					}
+					TickFilterEngine.Input<ExportRecord> tickInput = VisibleFunctionExportJson.tickFilterInput(record);
+					engine.add(tickInput);
+					currentTick = Math.max(currentTick, tickInput.tick());
+					records++;
+					lastGoodOffset = offset;
+				}
+			}
+		}
+
+		if (metadata == null) {
+			throw new IOException("Empty v3 recording journal: " + journal);
+		}
+		return new JournalScan(metadata, records, engine.snapshots(currentTick), lastGoodOffset);
+	}
+
+	private static JournalScan scanV2Journal(Path journal, JournalMetadata metadata) throws IOException {
+		TickFilterEngine<ExportRecord> engine = recordingTickFilter();
 		int records = 0;
 		long currentTick = 0;
 		try (BufferedReader reader = Files.newBufferedReader(journal, StandardCharsets.UTF_8)) {
@@ -324,24 +619,25 @@ final class VisibleFunctionRecordingManager {
 				records++;
 			}
 		}
-		return new JournalScan(records, engine.snapshots(currentTick));
+		return new JournalScan(metadata, records, engine.snapshots(currentTick), Files.size(journal));
 	}
 
-	private static boolean isValidRecord(String line) {
-		return parseRecord(line) != null;
+	private static TickFilterEngine<ExportRecord> recordingTickFilter() {
+		return new TickFilterEngine<>(
+			RECORDING_TICK_FILTER_IDS_PER_BUCKET,
+			RECORDING_TICK_FILTER_SAMPLES_PER_BUCKET
+		);
 	}
 
 	private static ExportRecord parseRecord(String line) {
 		try {
 			var json = JsonParser.parseString(line).getAsJsonObject();
-			var basic = json.getAsJsonObject("basicFields");
-			var detailed = json.getAsJsonObject("detailedFields");
 			VisibleFunctionEventPayload payload = new VisibleFunctionEventPayload(
 				json.get("type").getAsString(),
 				json.get("subject").getAsString(),
 				json.get("summary").getAsString(),
-				fieldText(basic),
-				fieldText(detailed)
+				fieldText(json.getAsJsonObject("basicFields")),
+				fieldText(json.getAsJsonObject("detailedFields"))
 			);
 			return new ExportRecord(
 				json.get("id").getAsLong(),
@@ -365,100 +661,30 @@ final class VisibleFunctionRecordingManager {
 		return text.toString();
 	}
 
-	private static void movePublished(Path staging, Path file) throws IOException {
-		try {
-			Files.move(staging, file, StandardCopyOption.ATOMIC_MOVE);
-		} catch (AtomicMoveNotSupportedException ignored) {
-			Files.move(staging, file);
+	private static String firstLine(Path file) throws IOException {
+		try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+			return reader.readLine();
 		}
 	}
 
-	private static String readRecordingFile(Path file, String id) {
-		try {
-			return Files.readString(file, StandardCharsets.UTF_8);
-		} catch (IOException exception) {
-			VisibleFunction.LOGGER.warn("Failed to read VisibleFunction recording {}", id, exception);
-			return "{\"recording\":null}";
-		}
+	private static boolean isV3Header(String header) {
+		return header != null && header.contains("\"format\":\"" + JOURNAL_FORMAT_V3 + "\"");
 	}
 
-	private static void metadataJson(StringBuilder json, CompletedRecording recording) {
-		json.append('{');
-		property(json, "id", recording.id()).append(',');
-		property(json, "startedAtMillis", recording.startedAtMillis()).append(',');
-		property(json, "endedAtMillis", recording.endedAtMillis()).append(',');
-		property(json, "durationMillis", Math.max(0, recording.endedAtMillis() - recording.startedAtMillis())).append(',');
-		property(json, "file", recording.file().toString()).append(',');
-		property(json, "records", recording.recordCount()).append(',');
-		property(json, "recovered", recording.recovered());
-		json.append('}');
-	}
-
-	private List<CompletedRecording> knownRecordings() {
-		Map<String, CompletedRecording> known = new LinkedHashMap<>();
-		for (CompletedRecording recording : completedRecordings) {
-			known.put(recording.id(), recording);
-		}
-
-		if (Files.isDirectory(recordingDir)) {
-			try (DirectoryStream<Path> stream = Files.newDirectoryStream(recordingDir, "visiblefunction-recording-*.json")) {
-				for (Path file : stream) {
-					CompletedRecording recording = metadataFromFile(file);
-					if (recording != null) {
-						known.putIfAbsent(recording.id(), recording);
-					}
-				}
-			} catch (IOException exception) {
-				VisibleFunction.LOGGER.warn("Failed to scan VisibleFunction recordings directory", exception);
-			}
-		}
-
-		List<CompletedRecording> sorted = new ArrayList<>(known.values());
-		sorted.sort(Comparator.comparingLong(CompletedRecording::startedAtMillis));
-		return sorted;
-	}
-
-	private static CompletedRecording metadataFromFile(Path file) {
-		String id = idFromFile(file);
-		if (!isSafeRecordingId(id)) {
-			return null;
-		}
-
-		try {
-			String json = metadataPrefix(file);
-			long modified = Files.getLastModifiedTime(file).toMillis();
-			long started = longField(json, "startedAtMillis", modified);
-			long ended = longField(json, "endedAtMillis", started);
-			int records = (int) longField(json, "records", 0);
-			boolean recovered = booleanField(json, "recovered", false);
-			return new CompletedRecording(id, started, ended, file, records, recovered);
-		} catch (IOException exception) {
-			VisibleFunction.LOGGER.warn("Failed to inspect VisibleFunction recording {}", file, exception);
-			return null;
-		}
-	}
-
-	private static String journalHeader(RecordingSession session) {
-		StringBuilder json = new StringBuilder(128);
-		json.append('{');
-		property(json, "journal", JOURNAL_FORMAT).append(',');
-		property(json, "id", session.id()).append(',');
-		property(json, "startedAtMillis", session.startedAtMillis());
-		json.append('}');
-		return json.toString();
-	}
-
-	private static JournalMetadata parseJournalHeader(String header, Path file) {
-		if (header == null) {
+	private static JournalMetadata parseV3JournalHeader(String header, Path file) {
+		if (!isV3Header(header)) {
 			return null;
 		}
 		try {
-			var json = JsonParser.parseString(header).getAsJsonObject();
-			if (!JOURNAL_FORMAT.equals(json.get("journal").getAsString())) {
+			String prefix = "{\"journal\":";
+			String suffix = ",\"records\":[";
+			if (!header.startsWith(prefix) || !header.endsWith(suffix)) {
 				return null;
 			}
+			String metadataJson = header.substring(prefix.length(), header.length() - suffix.length());
+			var json = JsonParser.parseString(metadataJson).getAsJsonObject();
 			String id = json.get("id").getAsString();
-			if (!isSafeRecordingId(id) || !file.getFileName().toString().equals("visiblefunction-recording-" + id + ".journal.tmp")) {
+			if (!isSafeRecordingId(id) || !journalName(id).equals(file.getFileName().toString())) {
 				return null;
 			}
 			return new JournalMetadata(id, json.get("startedAtMillis").getAsLong());
@@ -467,33 +693,49 @@ final class VisibleFunctionRecordingManager {
 		}
 	}
 
-	private static String recordingHeader(
-		String id,
-		long startedAtMillis,
-		long endedAtMillis,
-		Path file,
-		boolean recovered,
-		int records
-	) {
-		StringBuilder json = new StringBuilder(256);
-		json.append("{\"recording\":{");
-		property(json, "id", id).append(',');
-		property(json, "startedAtMillis", startedAtMillis).append(',');
-		property(json, "endedAtMillis", endedAtMillis).append(',');
-		property(json, "durationMillis", Math.max(0, endedAtMillis - startedAtMillis)).append(',');
-		property(json, "file", file.toString()).append(',');
-		property(json, "records", records).append(',');
-		property(json, "format", "records-v2").append(',');
-		property(json, "recovered", recovered);
-		json.append("},\"records\":[");
-		return json.toString();
+	private static JournalMetadata parseV2JournalHeader(String header, Path file) {
+		if (header == null) {
+			return null;
+		}
+		try {
+			var json = JsonParser.parseString(header).getAsJsonObject();
+			if (!JOURNAL_FORMAT_V2.equals(json.get("journal").getAsString())) {
+				return null;
+			}
+			String id = json.get("id").getAsString();
+			if (!isSafeRecordingId(id) || !journalName(id).equals(file.getFileName().toString())) {
+				return null;
+			}
+			return new JournalMetadata(id, json.get("startedAtMillis").getAsLong());
+		} catch (RuntimeException ignored) {
+			return null;
+		}
 	}
 
 	private static String recordingFooter(
+		JournalMetadata metadata,
+		long endedAtMillis,
+		Path file,
 		int records,
+		boolean recovered,
+		String stopReason,
 		List<TickFilterEngine.Snapshot<ExportRecord>> tickFilter
 	) {
-		return "],\"data\":" + emptyGroupedDataJson(records, tickFilter) + "}";
+		StringBuilder json = new StringBuilder(512);
+		json.append("],\"data\":");
+		json.append(emptyGroupedDataJson(records, tickFilter));
+		json.append(",\"recording\":{");
+		property(json, "id", metadata.id()).append(',');
+		property(json, "startedAtMillis", metadata.startedAtMillis()).append(',');
+		property(json, "endedAtMillis", endedAtMillis).append(',');
+		property(json, "durationMillis", Math.max(0, endedAtMillis - metadata.startedAtMillis())).append(',');
+		property(json, "file", file.toString()).append(',');
+		property(json, "records", records).append(',');
+		property(json, "format", "records-v3").append(',');
+		property(json, "recovered", recovered).append(',');
+		property(json, "stopReason", stopReason);
+		json.append("}}");
+		return json.toString();
 	}
 
 	private static String emptyGroupedDataJson(
@@ -506,12 +748,119 @@ final class VisibleFunctionRecordingManager {
 			+ VisibleFunctionExportJson.tickFilterArrayJson(tickFilter) + "}";
 	}
 
-	private Path findRecordingFile(String id) {
+	private static void movePublished(Path journal, Path file) throws IOException {
+		try {
+			Files.move(journal, file, StandardCopyOption.ATOMIC_MOVE);
+		} catch (AtomicMoveNotSupportedException ignored) {
+			Files.move(journal, file);
+		}
+	}
+
+	private static void force(Path file) throws IOException {
+		try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
+			channel.force(true);
+		}
+	}
+
+	private static String readRecordingFile(Path file, String id) {
+		try {
+			return Files.readString(file, StandardCharsets.UTF_8);
+		} catch (IOException exception) {
+			VisibleFunction.LOGGER.warn("Failed to read VisibleFunction recording {}", id, exception);
+			return "{\"recording\":null}";
+		}
+	}
+
+	private static Path readableRecordingFile(Path file) {
+		return file != null && Files.isRegularFile(file) ? file : null;
+	}
+
+	private static void metadataJson(StringBuilder json, CompletedRecording recording) {
+		json.append('{');
+		property(json, "id", recording.id()).append(',');
+		property(json, "startedAtMillis", recording.startedAtMillis()).append(',');
+		property(json, "endedAtMillis", recording.endedAtMillis()).append(',');
+		property(json, "durationMillis", Math.max(0, recording.endedAtMillis() - recording.startedAtMillis())).append(',');
+		property(json, "file", recording.file().toString()).append(',');
+		property(json, "records", recording.recordCount()).append(',');
+		property(json, "recovered", recording.recovered()).append(',');
+		property(json, "stopReason", recording.stopReason());
+		json.append('}');
+	}
+
+	private List<CompletedRecording> knownRecordings() {
+		Map<String, CompletedRecording> known = new LinkedHashMap<>();
+		for (CompletedRecording recording : completedRecordings) {
+			known.put(recording.id(), recording);
+		}
+		if (Files.isDirectory(recordingDir)) {
+			try (DirectoryStream<Path> stream = Files.newDirectoryStream(recordingDir, "visiblefunction-recording-*.json")) {
+				for (Path file : stream) {
+					CompletedRecording recording = metadataFromFile(file);
+					if (recording != null) {
+						known.putIfAbsent(recording.id(), recording);
+					}
+				}
+			} catch (IOException exception) {
+				VisibleFunction.LOGGER.warn("Failed to scan VisibleFunction recordings directory", exception);
+			}
+		}
+		List<CompletedRecording> sorted = new ArrayList<>(known.values());
+		sorted.sort(Comparator.comparingLong(CompletedRecording::startedAtMillis));
+		return sorted;
+	}
+
+	private DirectoryStats directoryStats() throws IOException {
+		int count = 0;
+		long bytes = 0;
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(recordingDir, "visiblefunction-recording-*")) {
+			for (Path file : stream) {
+				if (Files.isRegularFile(file)) {
+					count++;
+					bytes = saturatedAdd(bytes, Files.size(file));
+				}
+			}
+		}
+		return new DirectoryStats(count, bytes);
+	}
+
+	private static CompletedRecording metadataFromFile(Path file) {
+		if (file == null) {
+			return null;
+		}
+		String id = idFromFile(file);
 		if (!isSafeRecordingId(id)) {
 			return null;
 		}
-		Path exact = recordingFile(id);
-		return Files.isRegularFile(exact) ? exact : null;
+		try {
+			String metadata = metadataText(file);
+			long modified = Files.getLastModifiedTime(file).toMillis();
+			return new CompletedRecording(
+				id,
+				longField(metadata, "startedAtMillis", modified),
+				longField(metadata, "endedAtMillis", modified),
+				file,
+				(int) longField(metadata, "records", 0),
+				booleanField(metadata, "recovered", false),
+				stringField(metadata, "stopReason", "unknown")
+			);
+		} catch (IOException exception) {
+			VisibleFunction.LOGGER.warn("Failed to inspect VisibleFunction recording {}", file, exception);
+			return null;
+		}
+	}
+
+	private static String metadataText(Path file) throws IOException {
+		long size = Files.size(file);
+		int prefixLength = (int) Math.min(4096, size);
+		int suffixLength = (int) Math.min(16384, size);
+		byte[] prefix = new byte[prefixLength];
+		byte[] suffix = new byte[suffixLength];
+		try (var channel = FileChannel.open(file, StandardOpenOption.READ)) {
+			channel.read(java.nio.ByteBuffer.wrap(prefix), 0);
+			channel.read(java.nio.ByteBuffer.wrap(suffix), Math.max(0, size - suffixLength));
+		}
+		return new String(prefix, StandardCharsets.UTF_8) + "\n" + new String(suffix, StandardCharsets.UTF_8);
 	}
 
 	private static String idFromFile(Path file) {
@@ -529,7 +878,7 @@ final class VisibleFunctionRecordingManager {
 
 	private static long longField(String json, String name, long fallback) {
 		String marker = "\"" + name + "\":";
-		int start = json.indexOf(marker);
+		int start = json.lastIndexOf(marker);
 		if (start < 0) {
 			return fallback;
 		}
@@ -547,7 +896,7 @@ final class VisibleFunctionRecordingManager {
 
 	private static boolean booleanField(String json, String name, boolean fallback) {
 		String marker = "\"" + name + "\":";
-		int start = json.indexOf(marker);
+		int start = json.lastIndexOf(marker);
 		if (start < 0) {
 			return fallback;
 		}
@@ -561,21 +910,62 @@ final class VisibleFunctionRecordingManager {
 		return fallback;
 	}
 
-	private static String metadataPrefix(Path file) throws IOException {
-		try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-			char[] buffer = new char[4096];
-			int length = reader.read(buffer);
-			return length <= 0 ? "" : new String(buffer, 0, length);
+	private static String stringField(String json, String name, String fallback) {
+		String marker = "\"" + name + "\":\"";
+		int start = json.lastIndexOf(marker);
+		if (start < 0) {
+			return fallback;
 		}
+		start += marker.length();
+		int end = json.indexOf('"', start);
+		return end < 0 ? fallback : json.substring(start, end);
 	}
 
 	private static void writeUtf8(OutputStream output, String text) throws IOException {
 		output.write(text.getBytes(StandardCharsets.UTF_8));
 	}
 
+	private static long systemLong(String name, long fallback) {
+		try {
+			return Math.max(1, Long.parseLong(System.getProperty(name, Long.toString(fallback))));
+		} catch (NumberFormatException ignored) {
+			return fallback;
+		}
+	}
+
+	private static RecordingLimits defaultLimits() {
+		long maxBytes = Math.max(
+			FOOTER_RESERVE_BYTES + 1,
+			systemLong("visiblefunction.recording.maxBytes", 1024L * 1024 * 1024)
+		);
+		long maxTotalBytes = Math.max(
+			maxBytes,
+			systemLong("visiblefunction.recording.maxTotalBytes", 10L * 1024 * 1024 * 1024)
+		);
+		long maxFiles = systemLong("visiblefunction.recording.maxFiles", 100);
+		return new RecordingLimits(
+			maxBytes,
+			systemLong("visiblefunction.recording.maxDurationMillis", 2L * 60 * 60 * 1000),
+			(int) Math.min(Integer.MAX_VALUE, maxFiles),
+			maxTotalBytes,
+			systemLong("visiblefunction.recording.minFreeBytes", 1024L * 1024 * 1024)
+		);
+	}
+
+	private static long saturatedAdd(long left, long right) {
+		if (Long.MAX_VALUE - left < right) {
+			return Long.MAX_VALUE;
+		}
+		return left + right;
+	}
+
 	private static String sanitizeSuffix(String value) {
 		String sanitized = value == null ? "" : value.replaceAll("[^A-Za-z0-9_-]", "");
 		return sanitized.isBlank() ? UUID.randomUUID().toString().substring(0, 8) : sanitized;
+	}
+
+	private static String journalName(String id) {
+		return "visiblefunction-recording-" + id + ".journal.tmp";
 	}
 
 	private static StringBuilder property(StringBuilder json, String name, String value) {
@@ -605,16 +995,12 @@ final class VisibleFunctionRecordingManager {
 		return json;
 	}
 
-	private Path recordingFile(String id) {
+	private Path recordingFilePath(String id) {
 		return recordingDir.resolve("visiblefunction-recording-" + id + ".json");
 	}
 
 	private Path recordingJournalFile(String id) {
-		return recordingDir.resolve("visiblefunction-recording-" + id + ".journal.tmp");
-	}
-
-	private Path recordingStagingFile(String id) {
-		return recordingDir.resolve("visiblefunction-recording-" + id + ".json.part");
+		return recordingDir.resolve(journalName(id));
 	}
 
 	private static String absolutePath(Path path) {
@@ -624,18 +1010,104 @@ final class VisibleFunctionRecordingManager {
 	record RecordingResult(boolean success, String message) {
 	}
 
+	record RecordingLimits(
+		long maxBytes,
+		long maxDurationMillis,
+		int maxFiles,
+		long maxTotalBytes,
+		long minFreeBytes
+	) {
+		private RecordingLimits validated() {
+			if (maxBytes <= FOOTER_RESERVE_BYTES || maxDurationMillis <= 0 || maxFiles <= 0
+				|| maxTotalBytes < maxBytes || minFreeBytes < 0) {
+				throw new IllegalArgumentException("Invalid VisibleFunction recording limits");
+			}
+			return this;
+		}
+	}
+
+	@FunctionalInterface
+	interface UsableSpaceProbe {
+		long usableSpace(Path path) throws IOException;
+	}
+
 	private static final class RecordingSession {
 		private final String id;
 		private final long startedAtMillis;
 		private final Path journalFile;
-		private final BufferedWriter writer;
+		private final OutputStream output;
+		private final long completedBytesAtStart;
+		private final TickFilterEngine<ExportRecord> tickFilter = recordingTickFilter();
+		private boolean firstRecord = true;
 		private int recordCount;
+		private long bytesWritten;
+		private long bytesAtLastDiskCheck;
+		private long currentTick;
 
-		private RecordingSession(String id, long startedAtMillis, Path journalFile, BufferedWriter writer) {
+		private RecordingSession(
+			String id,
+			long startedAtMillis,
+			Path journalFile,
+			OutputStream output,
+			long completedBytesAtStart
+		) {
 			this.id = id;
 			this.startedAtMillis = startedAtMillis;
 			this.journalFile = journalFile;
-			this.writer = writer;
+			this.output = output;
+			this.completedBytesAtStart = completedBytesAtStart;
+		}
+
+		private void writeHeader() throws IOException {
+			StringBuilder header = new StringBuilder(192);
+			header.append("{\"journal\":{");
+			property(header, "format", JOURNAL_FORMAT_V3).append(',');
+			property(header, "id", id).append(',');
+			property(header, "startedAtMillis", startedAtMillis);
+			header.append("},\"records\":[\n");
+			byte[] bytes = header.toString().getBytes(StandardCharsets.UTF_8);
+			output.write(bytes);
+			output.flush();
+			bytesWritten += bytes.length;
+			bytesAtLastDiskCheck = bytesWritten;
+		}
+
+		private byte[] encodeRecord(ExportRecord record) {
+			String prefix = firstRecord ? "" : ",";
+			return (prefix + VisibleFunctionExportJson.record(record) + "\n").getBytes(StandardCharsets.UTF_8);
+		}
+
+		private void append(ExportRecord record, byte[] encoded) throws IOException {
+			output.write(encoded);
+			bytesWritten += encoded.length;
+			firstRecord = false;
+			recordCount++;
+			TickFilterEngine.Input<ExportRecord> input = VisibleFunctionExportJson.tickFilterInput(record);
+			tickFilter.add(input);
+			currentTick = Math.max(currentTick, input.tick());
+			if (recordCount % RECORDING_FLUSH_INTERVAL == 0) {
+				output.flush();
+			}
+		}
+
+		private boolean shouldCheckDisk(int nextRecordBytes) {
+			long projectedBytes = saturatedAdd(bytesWritten, nextRecordBytes);
+			return recordCount == 0
+				|| recordCount % RECORDING_FLUSH_INTERVAL == 0
+				|| projectedBytes - bytesAtLastDiskCheck >= DISK_CHECK_INTERVAL_BYTES;
+		}
+
+		private void markDiskChecked() {
+			bytesAtLastDiskCheck = bytesWritten;
+		}
+
+		private JournalScan scan() {
+			return new JournalScan(
+				new JournalMetadata(id, startedAtMillis),
+				recordCount,
+				tickFilter.snapshots(currentTick),
+				bytesWritten
+			);
 		}
 
 		private String id() {
@@ -654,23 +1126,23 @@ final class VisibleFunctionRecordingManager {
 			return recordCount;
 		}
 
-		private void append(ExportRecord record) throws IOException {
-			writer.write(VisibleFunctionExportJson.record(record));
-			writer.newLine();
-			recordCount++;
-			if (recordCount % RECORDING_FLUSH_INTERVAL == 0) {
-				writer.flush();
-			}
+		private long bytesWritten() {
+			return bytesWritten;
+		}
+
+		private long completedBytesAtStart() {
+			return completedBytesAtStart;
 		}
 
 		private void close() throws IOException {
-			writer.flush();
-			writer.close();
+			output.flush();
+			output.close();
+			force(journalFile);
 		}
 
 		private void closeQuietly() {
 			try {
-				writer.close();
+				output.close();
 			} catch (IOException ignored) {
 			}
 		}
@@ -680,9 +1152,14 @@ final class VisibleFunctionRecordingManager {
 	}
 
 	private record JournalScan(
+		JournalMetadata metadata,
 		int records,
-		List<TickFilterEngine.Snapshot<ExportRecord>> tickFilter
+		List<TickFilterEngine.Snapshot<ExportRecord>> tickFilter,
+		long lastGoodOffset
 	) {
+	}
+
+	private record DirectoryStats(int fileCount, long totalBytes) {
 	}
 
 	private record CompletedRecording(
@@ -691,7 +1168,8 @@ final class VisibleFunctionRecordingManager {
 		long endedAtMillis,
 		Path file,
 		int recordCount,
-		boolean recovered
+		boolean recovered,
+		String stopReason
 	) {
 	}
 }

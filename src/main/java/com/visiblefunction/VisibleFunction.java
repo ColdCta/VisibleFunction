@@ -69,6 +69,7 @@ public class VisibleFunction implements ModInitializer {
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			CommandTraceContext.tick(server);
 			VisibleFunctionExportServer.instance().tick(server.overworld().getGameTime());
+			VisibleFunctionRecordingManager.instance().tick();
 		});
 
 		ServerEntityEvents.ALLOW_LOAD.register((entity, level, spawnReason, loadedFromDisk) -> {

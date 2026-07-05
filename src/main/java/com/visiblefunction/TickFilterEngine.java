@@ -16,9 +16,22 @@ final class TickFilterEngine<T> {
 	static final int HIGH_FREQUENCY_THRESHOLD = 8;
 	static final int MAX_SAMPLE_RECORDS = 6;
 	static final int MAX_BUCKETS = 4096;
-	private static final int MAX_RECORD_IDS_PER_BUCKET = 8192;
+	private static final int DEFAULT_MAX_RECORD_IDS_PER_BUCKET = 8192;
+	private static final int MAX_KEY_LENGTH = 768;
+	private static final int MAX_DISPLAY_NAME_LENGTH = 256;
 
 	private final Map<String, MutableBucket<T>> buckets = new LinkedHashMap<>();
+	private final int maxRecordIdsPerBucket;
+	private final int maxSamplesPerBucket;
+
+	TickFilterEngine() {
+		this(DEFAULT_MAX_RECORD_IDS_PER_BUCKET, MAX_SAMPLE_RECORDS);
+	}
+
+	TickFilterEngine(int maxRecordIdsPerBucket, int maxSamplesPerBucket) {
+		this.maxRecordIdsPerBucket = Math.max(0, maxRecordIdsPerBucket);
+		this.maxSamplesPerBucket = Math.max(0, maxSamplesPerBucket);
+	}
 
 	boolean add(Input<T> input) {
 		boolean captured = false;
@@ -26,7 +39,7 @@ final class TickFilterEngine<T> {
 			MutableBucket<T> bucket = buckets.get(spec.key());
 			if (bucket == null) {
 				ensureCapacity(input.tick());
-				bucket = new MutableBucket<>(spec, input);
+				bucket = new MutableBucket<>(spec, input, maxRecordIdsPerBucket, maxSamplesPerBucket);
 				buckets.put(spec.key(), bucket);
 			}
 			bucket.add(input);
@@ -135,21 +148,25 @@ final class TickFilterEngine<T> {
 			String command = normalize(input.command().isBlank() ? input.displayName() : input.command());
 			if (!command.isBlank()) {
 				specs.add(new BucketSpec(
-					"COMMAND:" + command + "|" + input.source() + "|" + input.functionId(),
+					boundedKey("COMMAND:" + command + "|" + input.source() + "|" + input.functionId()),
 					BucketType.COMMAND,
-					command
+					boundedDisplayName(command)
 				));
 			}
 		}
 		if ("EVENT".equals(input.category())) {
 			specs.add(new BucketSpec(
-				"EVENT:" + input.eventAction() + "|" + input.displayName() + "|" + input.command(),
+				boundedKey("EVENT:" + input.eventAction() + "|" + input.displayName() + "|" + input.command()),
 				BucketType.EVENT,
-				input.displayName()
+				boundedDisplayName(input.displayName())
 			));
 		}
 		if (hasFunction(input.functionId())) {
-			specs.add(new BucketSpec("FUNCTION:" + input.functionId(), BucketType.FUNCTION, input.functionId()));
+			specs.add(new BucketSpec(
+				boundedKey("FUNCTION:" + input.functionId()),
+				BucketType.FUNCTION,
+				boundedDisplayName(input.functionId())
+			));
 		}
 		return specs;
 	}
@@ -160,6 +177,20 @@ final class TickFilterEngine<T> {
 
 	private static String normalize(String command) {
 		return command == null ? "" : command.trim().replaceAll("\\s+", " ");
+	}
+
+	private static String boundedKey(String key) {
+		if (key.length() <= MAX_KEY_LENGTH) {
+			return key;
+		}
+		return key.substring(0, MAX_KEY_LENGTH - 17) + "#" + Integer.toUnsignedString(key.hashCode(), 16);
+	}
+
+	private static String boundedDisplayName(String displayName) {
+		if (displayName.length() <= MAX_DISPLAY_NAME_LENGTH) {
+			return displayName;
+		}
+		return displayName.substring(0, MAX_DISPLAY_NAME_LENGTH - 3) + "...";
 	}
 
 	enum BucketType {
@@ -231,6 +262,8 @@ final class TickFilterEngine<T> {
 		private final Set<Long> recordIds = new LinkedHashSet<>();
 		private final Map<Long, String> commandIdByRecord = new LinkedHashMap<>();
 		private final Map<String, Integer> commandIdCounts = new LinkedHashMap<>();
+		private final int maxRecordIds;
+		private final int maxSamples;
 		private long lastSeenTick;
 		private long startMillis;
 		private long endMillis;
@@ -239,7 +272,7 @@ final class TickFilterEngine<T> {
 		private boolean highFrequency;
 		private boolean tickFunction;
 
-		private MutableBucket(BucketSpec spec, Input<T> input) {
+		private MutableBucket(BucketSpec spec, Input<T> input, int maxRecordIds, int maxSamples) {
 			key = spec.key();
 			type = spec.type();
 			displayName = spec.displayName();
@@ -248,6 +281,8 @@ final class TickFilterEngine<T> {
 			startMillis = input.timestampMillis();
 			endMillis = input.timestampMillis();
 			sourceSummary = input.sourceSummary();
+			this.maxRecordIds = maxRecordIds;
+			this.maxSamples = maxSamples;
 		}
 
 		private void add(Input<T> input) {
@@ -268,21 +303,23 @@ final class TickFilterEngine<T> {
 			highFrequency |= recentCount() >= HIGH_FREQUENCY_THRESHOLD;
 
 			recordIds.add(input.recordId());
-			while (recordIds.size() > MAX_RECORD_IDS_PER_BUCKET) {
+			if (!"none".equals(input.commandId())) {
+				commandIdByRecord.put(input.recordId(), input.commandId());
+				commandIdCounts.merge(input.commandId(), 1, Integer::sum);
+			}
+			while (recordIds.size() > maxRecordIds) {
 				Iterator<Long> iterator = recordIds.iterator();
 				long removedId = iterator.next();
 				iterator.remove();
 				removeCommandId(removedId);
 			}
-			if (!"none".equals(input.commandId())) {
-				commandIdByRecord.put(input.recordId(), input.commandId());
-				commandIdCounts.merge(input.commandId(), 1, Integer::sum);
-			}
 
-			if (sampleRecords.size() >= MAX_SAMPLE_RECORDS) {
+			if (maxSamples > 0 && sampleRecords.size() >= maxSamples) {
 				sampleRecords.removeFirst();
 			}
-			sampleRecords.addLast(new Sample<>(input.recordId(), input.sample()));
+			if (maxSamples > 0) {
+				sampleRecords.addLast(new Sample<>(input.recordId(), input.sample()));
+			}
 		}
 
 		private void removeRecord(long recordId) {

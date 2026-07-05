@@ -15,6 +15,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -260,12 +262,15 @@ final class VisibleFunctionExportServer {
 				case "/api/v1/datapack-triggers" -> writeJson(socket, DatapackTriggerIndex.json());
 				case "/api/v1/recording/status" -> writeJson(socket, VisibleFunctionRecordingManager.instance().statusJson());
 				case "/api/v1/recordings" -> writeJson(socket, VisibleFunctionRecordingManager.instance().recordingsJson());
-				case "/api/v1/recordings/latest" -> writeJson(socket, VisibleFunctionRecordingManager.instance().latestRecordingJson());
+				case "/api/v1/recordings/latest" -> writeRecording(
+					socket,
+					VisibleFunctionRecordingManager.instance().latestRecordingFile()
+				);
 				case "/api/v1/stream" -> stream(socket);
 				default -> {
 					if (path.startsWith("/api/v1/recordings/")) {
 						String id = decode(path.substring("/api/v1/recordings/".length()));
-						writeJson(socket, VisibleFunctionRecordingManager.instance().recordingJson(id));
+						writeRecording(socket, VisibleFunctionRecordingManager.instance().findRecordingFile(id));
 					} else if (path.startsWith("/assets/")) {
 						writeFrontendResource(socket, path);
 					} else {
@@ -408,6 +413,27 @@ final class VisibleFunctionExportServer {
 	private static void writeText(Socket socket, int status, String reason, String contentType, String body) throws IOException {
 		byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
 		writeBytes(socket, status, reason, contentType, bytes, null);
+	}
+
+	private static void writeRecording(Socket socket, Path file) throws IOException {
+		if (file == null) {
+			writeJson(socket, "{\"recording\":null}");
+			return;
+		}
+		long length = Files.size(file);
+		OutputStream output = socket.getOutputStream();
+		PrintWriter writer = new PrintWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8), false);
+		writer.print("HTTP/1.1 200 OK\r\n");
+		writer.print("Content-Type: application/json; charset=utf-8\r\n");
+		writer.print("Content-Length: " + length + "\r\n");
+		writer.print("Cache-Control: no-store\r\n");
+		writer.print("Access-Control-Allow-Origin: *\r\n");
+		writer.print("X-Content-Type-Options: nosniff\r\n");
+		writer.print("Connection: close\r\n");
+		writer.print("\r\n");
+		writer.flush();
+		Files.copy(file, output);
+		output.flush();
 	}
 
 	private static void writeBytes(
