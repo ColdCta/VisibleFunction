@@ -20,10 +20,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 final class VisibleFunctionExportServer {
 	private static final int DEFAULT_LIMIT = 500;
@@ -32,6 +36,11 @@ final class VisibleFunctionExportServer {
 	private static final int MAX_RETAINED_RECORDS = 20000;
 	private static final int RETAINED_RECORD_PRUNE_BATCH = 1000;
 	private static final int MAX_PENDING_STREAM_RECORDS = 8192;
+	// Per-client outbound buffer. Writes go through each client's own thread, so a client that is
+	// not reading only backs up its own queue; once it overflows the client is dropped instead of
+	// stalling delivery to everyone else.
+	private static final int CLIENT_QUEUE_CAPACITY = 256;
+	private static final long KEEPALIVE_INTERVAL_MILLIS = 15000;
 	private static final String FRONTEND_RESOURCE_ROOT = "/assets/visiblefunction/web";
 	private static final VisibleFunctionExportServer INSTANCE = new VisibleFunctionExportServer();
 
@@ -183,7 +192,9 @@ final class VisibleFunctionExportServer {
 				String eventName = batch.size() == 1 ? "record" : "records";
 				String eventJson = batch.size() == 1 ? VisibleFunctionExportJson.record(batch.getFirst()) : VisibleFunctionExportJson.records(batch);
 				for (SseClient client : clients) {
-					if (!client.event(eventName, eventJson)) {
+					// Non-blocking enqueue: a slow client can never stall this loop. If its buffer is
+					// full it has fallen too far behind, so drop it.
+					if (!client.offer(eventName, eventJson)) {
 						clients.remove(client);
 						client.close();
 					}
@@ -323,22 +334,16 @@ final class VisibleFunctionExportServer {
 
 		SseClient client = new SseClient(socket, writer);
 		clients.add(client);
-		client.event("hello", VisibleFunctionExportJson.health(running, port, recordCount(), sessionId));
-
-		while (running && !socket.isClosed()) {
-			try {
-				Thread.sleep(15000);
-			} catch (InterruptedException ignored) {
-				Thread.currentThread().interrupt();
-				break;
-			}
-			if (!client.comment("keepalive")) {
-				break;
-			}
+		try {
+			// Prime with the current health snapshot, then hand the socket to the client's own
+			// writer loop. Every socket write happens on this thread, so a blocked write only ever
+			// stalls this one client — the broadcast loop merely enqueues frames.
+			client.writeHello(VisibleFunctionExportJson.health(running, port, recordCount(), sessionId));
+			client.runUntilClosed(this::running);
+		} finally {
+			clients.remove(client);
+			client.close();
 		}
-
-		clients.remove(client);
-		client.close();
 	}
 
 	private static void writeJson(Socket socket, String body) throws IOException {
@@ -519,26 +524,51 @@ final class VisibleFunctionExportServer {
 	private static final class SseClient {
 		private final Socket socket;
 		private final PrintWriter writer;
+		private final BlockingQueue<String> outbound = new LinkedBlockingQueue<>(CLIENT_QUEUE_CAPACITY);
+		private volatile boolean closed;
+		private volatile Thread worker;
 
 		private SseClient(Socket socket, PrintWriter writer) {
 			this.socket = socket;
 			this.writer = writer;
 		}
 
-		private synchronized boolean event(String event, String json) {
-			writer.print("event: " + event + "\n");
-			writer.print("data: " + json + "\n\n");
-			writer.flush();
-			return !writer.checkError();
+		// Called from the broadcast thread. Non-blocking: enqueues a formatted SSE frame and returns
+		// false if the buffer is full (the client is too slow and should be dropped).
+		private boolean offer(String event, String json) {
+			return !closed && outbound.offer("event: " + event + "\ndata: " + json + "\n\n");
 		}
 
-		private synchronized boolean comment(String text) {
-			writer.print(": " + text + "\n\n");
+		private void writeHello(String json) {
+			writer.print("event: hello\ndata: " + json + "\n\n");
 			writer.flush();
-			return !writer.checkError();
+		}
+
+		// Runs on the client's own request thread, draining queued frames to the socket and emitting
+		// a keepalive comment whenever the queue stays idle. Any blocking socket write only stalls
+		// this thread; the shared broadcast loop is never affected.
+		private void runUntilClosed(BooleanSupplier running) {
+			worker = Thread.currentThread();
+			try {
+				while (running.getAsBoolean() && !closed && !socket.isClosed()) {
+					String frame = outbound.poll(KEEPALIVE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
+					writer.print(frame != null ? frame : ": keepalive\n\n");
+					writer.flush();
+					if (writer.checkError()) {
+						break;
+					}
+				}
+			} catch (InterruptedException ignored) {
+				Thread.currentThread().interrupt();
+			}
 		}
 
 		private void close() {
+			closed = true;
+			Thread current = worker;
+			if (current != null) {
+				current.interrupt();
+			}
 			try {
 				socket.close();
 			} catch (IOException ignored) {
