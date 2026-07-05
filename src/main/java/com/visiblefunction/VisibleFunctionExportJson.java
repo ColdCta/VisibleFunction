@@ -161,13 +161,14 @@ final class VisibleFunctionExportJson {
 		return json.toString();
 	}
 
-	static String health(boolean running, int port, int records, long sessionId) {
-		StringBuilder json = new StringBuilder(96);
+	static String health(boolean running, int port, int records, long sessionId, long currentTick) {
+		StringBuilder json = new StringBuilder(112);
 		json.append('{');
 		property(json, "running", running).append(',');
 		property(json, "port", port).append(',');
 		property(json, "records", records).append(',');
-		property(json, "sessionId", sessionId);
+		property(json, "sessionId", sessionId).append(',');
+		property(json, "currentTick", currentTick);
 		json.append('}');
 		return json.toString();
 	}

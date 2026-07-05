@@ -254,7 +254,7 @@ final class VisibleFunctionExportServer {
 
 			switch (path) {
 				case "/", "/index.html" -> writeFrontendResource(socket, path);
-				case "/health" -> writeJson(socket, VisibleFunctionExportJson.health(running, port, recordCount(), sessionId));
+				case "/health" -> writeJson(socket, VisibleFunctionExportJson.health(running, port, recordCount(), sessionId, currentTick));
 				case "/api/v1/records" -> writeJson(socket, recordsResponse(query));
 				case "/api/v1/grouped" -> writeJson(socket, groupedResponse(query));
 				case "/api/v1/tick-filter" -> writeJson(socket, tickFilterResponse(query));
@@ -362,7 +362,7 @@ final class VisibleFunctionExportServer {
 			// Prime with the current health snapshot, then hand the socket to the client's own
 			// writer loop. Every socket write happens on this thread, so a blocked write only ever
 			// stalls this one client — the broadcast loop merely enqueues frames.
-			client.writeHello(VisibleFunctionExportJson.health(running, port, recordCount(), sessionId));
+			client.writeHello(VisibleFunctionExportJson.health(running, port, recordCount(), sessionId, currentTick));
 			client.runUntilClosed(this::running);
 		} finally {
 			clients.remove(client);
