@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTraceStore } from "../../store/traceStore";
 import type { TraceTickSummary } from "../../store/traceStore";
@@ -44,6 +44,9 @@ export function Timeline() {
   const highlightIds = useTraceStore((s) => s.highlightIds);
   const connection = useTraceStore((s) => s.connection);
   const tickFilterBuckets = useTraceStore((s) => s.tickFilterBuckets);
+  const mode = useTraceStore((s) => s.mode);
+  const paused = useTraceStore((s) => s.paused);
+  const liveCurrentTick = useTraceStore((s) => s.liveCurrentTick);
   const scrollerRef = useRef<HTMLDivElement>(null);
   // Mirrors the scroller's horizontal scroll position via rAF-throttled listener so the minimap's
   // viewport rectangle tracks the native scrollbar (the minimap is read-only — no drag/paging).
@@ -71,6 +74,17 @@ export function Timeline() {
     if (records.length === 0) return visibleBuckets[visibleBuckets.length - 1]?.key;
     return String(Math.floor(latestTick / bucketTicks));
   }, [range.max, bucketTicks, visibleBuckets, records.length]);
+
+  // Server ticks elapsed since the newest record, with no events. The backend reports the live
+  // game tick every server tick (health.currentTick), so when the game runs but emits nothing we
+  // can show "N ticks skipped" at the live edge instead of a frozen axis that misleads the user.
+  const idleTicks = useMemo(() => {
+    // Paused freezes ingestion by choice, so records lagging the game tick isn't "no events".
+    if (mode !== "live" || paused) return 0;
+    if (connection !== "open" && connection !== "reconnecting") return 0;
+    if (!Number.isFinite(range.max) || liveCurrentTick <= 0) return 0;
+    return Math.max(0, liveCurrentTick - range.max);
+  }, [mode, paused, connection, range.max, liveCurrentTick]);
 
   // Horizontal virtualization (docs :791). Only render the columns actually in (or near) the
   // scroll viewport, not every bucket in the view range. All four lanes share the same column
@@ -191,6 +205,7 @@ export function Timeline() {
               buckets={visibleSlice}
               bucketTicks={bucketTicks}
               currentBucketKey={currentBucketKey}
+              idleTicks={idleTicks}
               offset={colStart}
             />
             <TickLane buckets={visibleSlice} hideIdle={filters.hideIdleTicks} enabled={filters.tick} currentBucketKey={currentBucketKey} offset={colStart} />
@@ -259,11 +274,13 @@ function BucketHeaderRow({
   buckets,
   bucketTicks,
   currentBucketKey,
+  idleTicks,
   offset,
 }: {
   buckets: TimelineBucket[];
   bucketTicks: number;
   currentBucketKey: string | undefined;
+  idleTicks: number;
   offset: number;
 }) {
   return (
@@ -274,9 +291,19 @@ function BucketHeaderRow({
         const label = tick ? `Tick ${tick}` : formatBucketHeader(b, bucketTicks);
         const isCurrent = b.key === currentBucketKey;
         return (
-          <div key={b.key} className={"bucket__header" + (isCurrent ? " bucket__header--current" : "")}>
-            {label}
-          </div>
+          <Fragment key={b.key}>
+            <div className={"bucket__header" + (isCurrent ? " bucket__header--current" : "")}>
+              {label}
+            </div>
+            {isCurrent && idleTicks > 0 && (
+              <div
+                className="bucket__idle"
+                title={`${idleTicks} server tick${idleTicks === 1 ? "" : "s"} elapsed since the last recorded event`}
+              >
+                ＋{idleTicks.toLocaleString()} tick{idleTicks === 1 ? "" : "s"} skipped · no events
+              </div>
+            )}
+          </Fragment>
         );
       })}
     </div>

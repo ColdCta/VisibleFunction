@@ -104,6 +104,9 @@ type Store = {
   liveSessionId: number | null;
   liveLastVisibleAt: number;
   liveWarmupState: "idle" | "warming" | "ready";
+  // Latest game tick reported by the backend (advances every server tick, even with no records).
+  // The timeline compares it to range.max to show "N ticks skipped (no events)" instead of freezing.
+  liveCurrentTick: number;
   highlightIds: Set<number>;
   relationshipGraphRequest: RelationshipGraphRequest | null;
   settings: SettingsState;
@@ -129,6 +132,7 @@ type Store = {
   loadLatestRecording: () => Promise<void>;
   pollRecordingStatus: () => Promise<void>;
   pollTickFilter: () => Promise<void>;
+  pollHealth: () => Promise<void>;
   setMode: (m: Mode) => void;
   ingestRecord: (r: TraceRecord) => void;
 };
@@ -190,6 +194,7 @@ export const useTraceStore = create<Store>((set, get) => ({
   liveSessionId: null,
   liveLastVisibleAt: Date.now(),
   liveWarmupState: "ready",
+  liveCurrentTick: 0,
   highlightIds: new Set(),
   relationshipGraphRequest: null,
   settings: { baseUrl: DEFAULT_BASE_URL, displayDensity: "comfortable", liveRetentionTicks: DEFAULT_LIVE_RETENTION_TICKS, liveBufferTicks: DEFAULT_LIVE_BUFFER_TICKS },
@@ -222,6 +227,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     try {
       const health = await client.health();
       resetLiveSessionIfNeeded(health.sessionId);
+      set({ liveCurrentTick: health.currentTick ?? 0 });
     } catch {
       // Backend unreachable. Fall back to mock only if the user explicitly pointed at "mock".
       if (get().baseUrl !== "mock") {
@@ -265,6 +271,7 @@ export const useTraceStore = create<Store>((set, get) => ({
           for (const record of msg.records) get().ingestRecord(record);
         } else if (msg.type === "hello") {
           resetLiveSessionIfNeeded(msg.sessionId);
+          set({ liveCurrentTick: msg.currentTick ?? 0 });
         }
       },
       () => {
@@ -293,9 +300,11 @@ export const useTraceStore = create<Store>((set, get) => ({
     statusTimer = window.setInterval(() => {
       void get().pollRecordingStatus();
       void get().pollTickFilter();
+      void get().pollHealth();
     }, 1000);
     void get().pollRecordingStatus();
     void get().pollTickFilter();
+    void get().pollHealth();
   },
 
   disconnect() {
@@ -528,6 +537,20 @@ export const useTraceStore = create<Store>((set, get) => ({
       set({ tickFilterBuckets: response.tickFilter ?? [] });
     } catch {
       /* keep the last canonical backend snapshot */
+    }
+  },
+
+  // Refresh the live game tick (~1s) so the timeline can show idle-tick progress even when no
+  // records arrive. Runs in mock mode too (the mock advances currentTick) so it is testable.
+  async pollHealth() {
+    const state = get();
+    if (state.mode !== "live") return;
+    if (state.connection !== "open" && state.connection !== "reconnecting") return;
+    try {
+      const health = await state.client.health();
+      set({ liveCurrentTick: health.currentTick ?? 0 });
+    } catch {
+      /* ignore; next tick retries */
     }
   },
 
@@ -905,6 +928,7 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     liveNode: empty,
     pendingRecords: [],
     tickFilterBuckets: [],
+    liveCurrentTick: 0,
     relationshipGraphRequest: null,
     ...(state.mode === "live" ? empty : {}),
   });

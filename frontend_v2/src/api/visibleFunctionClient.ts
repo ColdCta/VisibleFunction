@@ -13,7 +13,7 @@ import type {
 export type StreamMessage =
   // The backend emits `hello` with the health JSON. `data` may contain a `type`-named field, so
   // destructure `type` out before spreading to avoid overwriting our discriminator.
-  | { type: "hello"; running: boolean; port: number; records: number; sessionId: number }
+  | { type: "hello"; running: boolean; port: number; records: number; sessionId: number; currentTick: number }
   | { type: "record"; record: TraceRecord }
   | { type: "records"; records: TraceRecord[] };
 
@@ -110,6 +110,7 @@ export class VisibleFunctionClient {
           port: Number(data.port ?? 0),
           records: Number(data.records ?? 0),
           sessionId: Number(data.sessionId ?? 0),
+          currentTick: Number(data.currentTick ?? 0),
         });
       } catch {
         /* ignore malformed frame */

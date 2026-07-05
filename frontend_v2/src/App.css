@@ -437,6 +437,7 @@
   padding: 8px 0;
   font-family: var(--font-mono);
   border-left: 1px dashed var(--grid);
+  position: relative;
 }
 .bucket__label-spacer {
   flex: 0 0 200px;
@@ -446,7 +447,35 @@
 .bucket__header:first-child { border-left: none; }
 .bucket__header--current {
   color: var(--selected);
-  box-shadow: inset -2px 0 0 var(--selected);
+}
+/* The current-tick axis is drawn as one flat rule on the right edge of the current column,
+   repeated identically across the header and every lane. No glow, and the lane segments extend
+   1px past their box (below) so the 1px lane borders don't chop the line into stitched pieces. */
+.bucket__header--current::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--selected);
+  pointer-events: none;
+  z-index: 4;
+}
+/* Live-edge marker: shown after the current tick when the server has advanced but produced no
+   records, so a running-but-silent game reads as "N ticks skipped" instead of a frozen axis. */
+.bucket__idle {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  color: var(--warn);
+  background: rgba(255, 180, 84, 0.12);
+  border: 1px solid rgba(255, 180, 84, 0.4);
+  border-radius: 999px;
 }
 
 .lane {
@@ -483,12 +512,13 @@
 .lane__cell--current::after {
   content: "";
   position: absolute;
-  top: 0;
+  /* -1px top/bottom bridges the 1px lane border-bottom so adjacent lane segments touch and the
+     axis reads as one continuous line rather than stitched-together blocks. */
+  top: -1px;
   right: 0;
-  bottom: 0;
+  bottom: -1px;
   width: 2px;
   background: var(--selected);
-  box-shadow: 0 0 12px rgba(98, 168, 255, 0.5);
   pointer-events: none;
   z-index: 4;
 }

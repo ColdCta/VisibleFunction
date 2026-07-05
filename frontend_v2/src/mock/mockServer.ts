@@ -201,6 +201,10 @@ function mockRuntimeTrigger(functionId: string): { type: "advancement" | "enchan
 
 let mockStarted = false;
 let mockInterval: number | null = null;
+// Simulated live game tick + phase counter so the mock can alternate between emitting events and
+// idle windows (game ticking, no records) to exercise the "N ticks skipped" live-edge marker.
+let mockCurrentTick = 0;
+let mockPhase = 0;
 let realFetch: typeof window.fetch | null = null;
 let realEventSource: typeof EventSource | null = null;
 let mockEventSourceInstalled = false;
@@ -251,7 +255,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
     const limit = Number(u.searchParams.get("limit") ?? "5000");
     const tail = u.searchParams.get("tail") === "true" || u.searchParams.get("tail") === "1";
     if (path === "/health") {
-      const body: HealthResponse = { running: true, port: 17654, records: records.length, sessionId: 1 };
+      const body: HealthResponse = { running: true, port: 17654, records: records.length, sessionId: 1, currentTick: mockCurrentTick };
       return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
     }
     if (path === "/api/v1/records") {
@@ -312,15 +316,25 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
   if (mockInterval === null) {
     mockInterval = window.setInterval(() => {
       if (!mockStarted) return;
-      const r = generateOne(++lastId, lastTs + 50);
-      lastTs = r.timestampMillis;
-      records.push(r);
-      try {
-        localStorage.setItem(MOCK_STORAGE_KEY, JSON.stringify(records.slice(-5000)));
-      } catch {
-        /* ignore */
+      mockPhase++;
+      // ~6s emitting events, then ~5s idle (game keeps ticking, no records) so the live-edge
+      // "N ticks skipped" marker can be seen appearing and climbing, then repeat.
+      const active = mockPhase % 44 < 24;
+      if (active) {
+        const r = generateOne(++lastId, lastTs + 50);
+        lastTs = r.timestampMillis;
+        records.push(r);
+        mockCurrentTick = Number(r.basicFields.tick) || mockCurrentTick;
+        try {
+          localStorage.setItem(MOCK_STORAGE_KEY, JSON.stringify(records.slice(-5000)));
+        } catch {
+          /* ignore */
+        }
+        mockListeners.forEach((cb) => cb({ type: "record", record: r }));
+      } else {
+        // Idle window: advance the game tick ~5 ticks per 250ms (≈20 TPS) with no records.
+        mockCurrentTick += 5;
       }
-      mockListeners.forEach((cb) => cb({ type: "record", record: r }));
     }, 250);
   }
 
@@ -353,7 +367,7 @@ function selectMockRecords(records: TraceRecord[], after: number, limit: number,
   return records.filter((r) => r.id > after).slice(0, limit);
 }
 
-const mockListeners = new Set<(m: { type: "record"; record: TraceRecord } | { type: "hello"; running: boolean; port: number; records: number; sessionId: number }) => void>();
+const mockListeners = new Set<(m: { type: "record"; record: TraceRecord } | { type: "hello"; running: boolean; port: number; records: number; sessionId: number; currentTick: number }) => void>();
 
 // Polyfill EventSource for mock mode only. Installed by applyMockServer; removed by stopMockServer.
 class MockEventSourceImpl {
@@ -363,14 +377,14 @@ class MockEventSourceImpl {
   private closeFn: (() => void) | null = null;
   constructor(url: string) {
     this.url = url;
-    const handler = (m: { type: "record"; record: TraceRecord } | { type: "hello"; running: boolean; port: number; records: number; sessionId: number }) => {
-      const payload = m.type === "record" ? m.record : { running: m.running, port: m.port, records: m.records, sessionId: m.sessionId };
+    const handler = (m: { type: "record"; record: TraceRecord } | { type: "hello"; running: boolean; port: number; records: number; sessionId: number; currentTick: number }) => {
+      const payload = m.type === "record" ? m.record : { running: m.running, port: m.port, records: m.records, sessionId: m.sessionId, currentTick: m.currentTick };
       const ev = new MessageEvent("message", { data: JSON.stringify(payload) });
       const cb = this.listeners[m.type];
       if (cb) cb(ev);
     };
     mockListeners.add(handler);
-    setTimeout(() => handler({ type: "hello", running: true, port: 17654, records: 0, sessionId: 1 }), 50);
+    setTimeout(() => handler({ type: "hello", running: true, port: 17654, records: 0, sessionId: 1, currentTick: mockCurrentTick }), 50);
     this.closeFn = () => mockListeners.delete(handler);
   }
   addEventListener(type: string, cb: (ev: MessageEvent) => void) {

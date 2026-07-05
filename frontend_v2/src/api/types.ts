@@ -32,6 +32,9 @@ export type HealthResponse = {
   port: number;
   records: number;
   sessionId: number;
+  // Live game tick (server.overworld().getGameTime()), pushed every server tick even when no
+  // events fire — lets the UI show how many ticks passed with no records instead of freezing.
+  currentTick: number;
 };
 
 export type GroupedResponse = {
