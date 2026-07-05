@@ -17,6 +17,8 @@ export type StreamMessage =
   | { type: "record"; record: TraceRecord }
   | { type: "records"; records: TraceRecord[] };
 
+const REQUEST_TIMEOUT_MS = 2500;
+
 export class VisibleFunctionClient {
   constructor(private baseUrl: string) {}
 
@@ -29,17 +31,27 @@ export class VisibleFunctionClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const res = await withTimeout(
-      fetch(`${this.baseUrl}${path}`, {
+    // Use an AbortController so the timeout actually cancels the in-flight request (and its body
+    // read) instead of leaving it running in the background after the wrapper promise rejects.
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, {
         headers: { Accept: "application/json" },
-      }),
-      2500,
-      path
-    );
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} ${res.statusText} for ${path}`);
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText} for ${path}`);
+      }
+      return (await res.json()) as T;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`Timeout after ${REQUEST_TIMEOUT_MS}ms for ${path}`);
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timer);
     }
-    return (await res.json()) as T;
   }
 
   health(): Promise<HealthResponse> {
@@ -138,20 +150,4 @@ function qs(params: { after?: number; limit?: number; tail?: boolean }): string 
   if (params.tail) q.set("tail", "true");
   const s = q.toString();
   return s ? `?${s}` : "";
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms for ${label}`)), timeoutMs);
-    promise.then(
-      (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        window.clearTimeout(timer);
-        reject(error);
-      }
-    );
-  });
 }

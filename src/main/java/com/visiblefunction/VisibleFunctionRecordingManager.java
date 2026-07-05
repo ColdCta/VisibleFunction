@@ -339,34 +339,26 @@ final class VisibleFunctionRecordingManager {
 	}
 
 	private static StringBuilder property(StringBuilder json, String name, String value) {
-		json.append('"').append(escape(name)).append("\":\"").append(escape(value)).append('"');
+		json.append('"');
+		VisibleFunctionExportJson.appendEscaped(json, name);
+		json.append("\":\"");
+		VisibleFunctionExportJson.appendEscaped(json, value);
+		json.append('"');
 		return json;
 	}
 
 	private static StringBuilder property(StringBuilder json, String name, long value) {
-		json.append('"').append(escape(name)).append("\":").append(value);
+		json.append('"');
+		VisibleFunctionExportJson.appendEscaped(json, name);
+		json.append("\":").append(value);
 		return json;
 	}
 
 	private static StringBuilder property(StringBuilder json, String name, int value) {
-		json.append('"').append(escape(name)).append("\":").append(value);
+		json.append('"');
+		VisibleFunctionExportJson.appendEscaped(json, name);
+		json.append("\":").append(value);
 		return json;
-	}
-
-	private static String escape(String value) {
-		StringBuilder escaped = new StringBuilder(value.length() + 8);
-		for (int index = 0; index < value.length(); index++) {
-			char character = value.charAt(index);
-			switch (character) {
-				case '"' -> escaped.append("\\\"");
-				case '\\' -> escaped.append("\\\\");
-				case '\n' -> escaped.append("\\n");
-				case '\r' -> escaped.append("\\r");
-				case '\t' -> escaped.append("\\t");
-				default -> escaped.append(character);
-			}
-		}
-		return escaped.toString();
 	}
 
 	private static Path recordingFile(String id) {

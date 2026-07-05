@@ -195,6 +195,11 @@ export function DatapackGraphView() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
+    // baseUrl is an intentional dependency even though it isn't referenced here: the store's
+    // setBaseUrl mutates the existing client in place, so `client` never changes identity.
+    // Depending on baseUrl re-creates this callback (and re-runs the load effect) when the user
+    // points the debugger at a different server.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseUrl, client]);
 
   useEffect(() => {

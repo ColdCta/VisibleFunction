@@ -428,6 +428,14 @@ final class VisibleFunctionExportJson {
 
 	private static StringBuilder quoted(StringBuilder json, String value) {
 		json.append('"');
+		appendEscaped(json, value);
+		json.append('"');
+		return json;
+	}
+
+	// Appends the JSON-escaped form of {@code value} (without the surrounding quotes). Shared with
+	// VisibleFunctionRecordingManager so both paths escape control characters identically.
+	static StringBuilder appendEscaped(StringBuilder json, String value) {
 		for (int index = 0; index < value.length(); index++) {
 			char character = value.charAt(index);
 			switch (character) {
@@ -447,7 +455,6 @@ final class VisibleFunctionExportJson {
 				}
 			}
 		}
-		json.append('"');
 		return json;
 	}
 
