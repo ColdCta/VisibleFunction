@@ -62,6 +62,68 @@ export function Sidebar() {
   );
 }
 
+// Collapsible section wrapper. "Configure-once" panels (tick range, retention, quick views) default
+// collapsed to cut the always-open control clutter; the state is remembered per panel so the layout
+// the user settles on sticks across reloads.
+function Panel({
+  id,
+  icon,
+  title,
+  defaultOpen = true,
+  children,
+}: {
+  id: string;
+  icon: React.ReactNode;
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(() => readPanelOpen(id, defaultOpen));
+  useEffect(() => {
+    writePanelOpen(id, open);
+  }, [id, open]);
+
+  return (
+    <section className={"panel" + (open ? "" : " panel--collapsed")}>
+      <h3 className="panel__title">
+        <button
+          type="button"
+          className="panel__toggle"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={`panel-${id}`}
+        >
+          <span className="panel__chevron" aria-hidden>{open ? "▾" : "▸"}</span>
+          <span className="panel__icon">{icon}</span>
+          <span className="panel__label">{title}</span>
+        </button>
+      </h3>
+      {open && (
+        <div id={`panel-${id}`} className="panel__content">
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function readPanelOpen(id: string, fallback: boolean): boolean {
+  try {
+    const stored = localStorage.getItem(`vf.panel.${id}`);
+    return stored === null ? fallback : stored === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writePanelOpen(id: string, open: boolean) {
+  try {
+    localStorage.setItem(`vf.panel.${id}`, open ? "1" : "0");
+  } catch {
+    /* localStorage unavailable (private mode / SSR) — fall back to in-memory only */
+  }
+}
+
 function SessionPanel({
   world,
   recordCount,
@@ -76,8 +138,7 @@ function SessionPanel({
   tickSpan: number;
 }) {
   return (
-    <section className="panel">
-      <h3 className="panel__title"><SectionIcon>📡</SectionIcon> SESSION</h3>
+    <Panel id="session" icon="📡" title="SESSION">
       <dl className="kv">
         <dt>World</dt>
         <dd className="mono">{world}</dd>
@@ -90,7 +151,7 @@ function SessionPanel({
         <dt>Ticks Captured</dt>
         <dd className="mono">{tickSpan > 0 ? tickSpan.toLocaleString() : "not available"}</dd>
       </dl>
-    </section>
+    </Panel>
   );
 }
 
@@ -123,8 +184,7 @@ function TickRangePanel({
   }, [viewMax, max]);
 
   return (
-    <section className="panel">
-      <h3 className="panel__title"><SectionIcon>⏱</SectionIcon> TICK RANGE</h3>
+    <Panel id="tickRange" icon="⏱" title="TICK RANGE" defaultOpen={false}>
       <div className="row gap-6">
         <input
           className="mono"
@@ -162,7 +222,7 @@ function TickRangePanel({
           <span>{max || 0}</span>
         </div>
       </div>
-    </section>
+    </Panel>
   );
 }
 
@@ -186,8 +246,7 @@ function LiveRetentionPanel({
   const totalSecs = (total / 20).toFixed(1);
 
   return (
-    <section className="panel">
-      <h3 className="panel__title"><SectionIcon>🖹</SectionIcon> LIVE RETENTION</h3>
+    <Panel id="liveRetention" icon="🖹" title="LIVE RETENTION" defaultOpen={false}>
       <div className="row gap-6" style={{ marginBottom: 6 }}>
         <label className="muted" style={{ fontSize: 11, flex: 1 }}>Visible</label>
         <input
@@ -220,7 +279,7 @@ function LiveRetentionPanel({
           ⚠ Large retention windows increase memory use under high throughput. Consider staying under {LIVE_RETENTION_WARN_TICKS}t (120s).
         </div>
       )}
-    </section>
+    </Panel>
   );
 }
 
@@ -238,8 +297,7 @@ function FiltersPanel({
     { key: "command", label: "Commands", color: "var(--command)" },
   ];
   return (
-    <section className="panel">
-      <h3 className="panel__title"><SectionIcon>🧪</SectionIcon> FILTERS</h3>
+    <Panel id="filters" icon="🧪" title="FILTERS">
       <div className="filters">
         {rows.map((r) => (
           <label key={r.key} className="filter-row">
@@ -264,14 +322,13 @@ function FiltersPanel({
           <Switch checked={value.hideHighFreq} onChange={(v) => onChange({ hideHighFreq: v })} />
         </label>
       </div>
-    </section>
+    </Panel>
   );
 }
 
 function SearchPanel({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
-    <section className="panel">
-      <h3 className="panel__title"><SectionIcon>🔍</SectionIcon> SEARCH</h3>
+    <Panel id="search" icon="🔍" title="SEARCH">
       <div className="search">
         <input
           value={value}
@@ -281,14 +338,13 @@ function SearchPanel({ value, onChange }: { value: string; onChange: (v: string)
         />
         <span className="search__hint mono">Ctrl K</span>
       </div>
-    </section>
+    </Panel>
   );
 }
 
 function QuickViews({ onPick }: { onPick: (id: QuickViewId) => void }) {
   return (
-    <section className="panel">
-      <h3 className="panel__title"><SectionIcon>✨</SectionIcon> QUICK VIEWS</h3>
+    <Panel id="quickViews" icon="✨" title="QUICK VIEWS" defaultOpen={false}>
       <div className="quickviews">
         {QuickViewPresets.map((q) => (
           <button key={q.id} className="quickview" onClick={() => onPick(q.id)}>
@@ -297,12 +353,8 @@ function QuickViews({ onPick }: { onPick: (id: QuickViewId) => void }) {
           </button>
         ))}
       </div>
-    </section>
+    </Panel>
   );
-}
-
-function SectionIcon({ children }: { children: React.ReactNode }) {
-  return <span className="panel__icon">{children}</span>;
 }
 
 function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {

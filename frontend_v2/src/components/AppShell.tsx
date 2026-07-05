@@ -59,17 +59,25 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [closeRelationshipGraph, relationshipGraphRequest, selection, setSelection, setFilters]);
 
+  // The inspector only earns its ~360px column once there's something to inspect. When nothing is
+  // selected we drop it and let the timeline take the width back (progressive disclosure); it
+  // reappears the moment a record is selected.
+  const showDetail = mode !== "datapack" && selection != null;
+  const bodyClass =
+    "shell__body" +
+    (mode === "datapack" ? " shell__body--datapack" : showDetail ? "" : " shell__body--no-detail");
+
   return (
     <div className="shell">
       <TopBar />
-      <div className={"shell__body" + (mode === "datapack" ? " shell__body--datapack" : "")}>
+      <div className={bodyClass}>
         {mode === "datapack" ? (
           <DatapackGraphView />
         ) : (
           <>
             <Sidebar />
             {mode === "recordings" ? <RecordingLibrary /> : <Timeline />}
-            <DetailPanel />
+            {showDetail && <DetailPanel />}
           </>
         )}
       </div>
