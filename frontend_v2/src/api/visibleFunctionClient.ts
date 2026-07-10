@@ -11,9 +11,8 @@ import type {
 } from "./types";
 
 export type StreamMessage =
-  // The backend emits `hello` with the health JSON. `data` may contain a `type`-named field, so
-  // destructure `type` out before spreading to avoid overwriting our discriminator.
-  | { type: "hello"; running: boolean; port: number; records: number; sessionId: number; currentTick: number }
+  // The backend emits `hello` with the health JSON; the client adds `type` as its discriminator.
+  | ({ type: "hello" } & HealthResponse)
   | { type: "record"; record: TraceRecord }
   | { type: "records"; records: TraceRecord[] };
 
@@ -106,11 +105,16 @@ export class VisibleFunctionClient {
         const data = JSON.parse((ev as MessageEvent).data) as Record<string, unknown>;
         onMessage({
           type: "hello",
+          protocolVersion: Number(data.protocolVersion ?? 1),
           running: Boolean(data.running),
           port: Number(data.port ?? 0),
           records: Number(data.records ?? 0),
           sessionId: Number(data.sessionId ?? 0),
           currentTick: Number(data.currentTick ?? 0),
+          oldestRecordId: Number(data.oldestRecordId ?? 0),
+          latestRecordId: Number(data.latestRecordId ?? 0),
+          droppedStreamRecords: Number(data.droppedStreamRecords ?? 0),
+          slowClientDisconnects: Number(data.slowClientDisconnects ?? 0),
         });
       } catch {
         /* ignore malformed frame */

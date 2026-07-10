@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   ConnectionState,
   FilterState,
+  HealthResponse,
   Mode,
   RecordingMetadata,
   RecordingStatus,
@@ -14,6 +15,13 @@ import { buildIndexes, addToIndexes, type TraceIndexes } from "./traceIndexes";
 import { recordTick } from "./traceTime";
 import type { RelationshipGraphRequest } from "./relationshipGraph";
 import { BoundedBuffer } from "./boundedBuffer";
+import {
+  addTraceGap,
+  markTraceGapsUnavailableBefore,
+  nextRecoveringTraceGap,
+  observeTraceRecord,
+  type TraceGap,
+} from "./traceGaps";
 
 const DEFAULT_VIEW_WINDOW_TICKS = 12 * 20; // ~12s at 20 TPS
 // Live retention is tick-based (not record-count-based) so the window stays a stable time span
@@ -37,6 +45,7 @@ const BACKFILL_LIMIT = 200;
 const RESUME_BACKFILL_LIMIT = 5000;
 const MAX_PENDING_RECORDS = 8192;
 const MAX_LIVE_RECORDS = 20000;
+export const MAX_SAFE_REPLAY_BYTES = 64 * 1024 * 1024;
 
 export type SettingsState = {
   baseUrl: string;
@@ -82,6 +91,12 @@ type Store = {
   connection: ConnectionState;
   mockMode: boolean;
   streamError: boolean;
+  traceGaps: TraceGap[];
+  clientDroppedRecords: number;
+  backendOldestRecordId: number;
+  backendLatestRecordId: number;
+  backendDroppedStreamRecords: number;
+  backendSlowClientDisconnects: number;
   mode: Mode;
   paused: boolean;
   pendingRecords: TraceRecord[];
@@ -101,6 +116,7 @@ type Store = {
   tickFilterBuckets: TickFilterBucketPayload[];
   recordings: RecordingMetadata[];
   activeRecording: RecordingMetadata | null;
+  recordingLoadError: string | null;
   liveSessionId: number | null;
   liveLastVisibleAt: number;
   liveWarmupState: "idle" | "warming" | "ready";
@@ -144,6 +160,9 @@ let statusTimer: number | null = null;
 let flushTimer: number | null = null;
 let liveWarmupTimer: number | null = null;
 let lastFlushTime = 0;
+let liveHighestObservedId = 0;
+let liveTraceGaps: TraceGap[] = [];
+let clientDroppedRecords = 0;
 const pendingIds = new Set<number>();
 const pendingBuffer = new BoundedBuffer<TraceRecord>(MAX_PENDING_RECORDS);
 const EMPTY_STATS: TraceStats = {
@@ -164,6 +183,12 @@ export const useTraceStore = create<Store>((set, get) => ({
   connection: "disconnected",
   mockMode: false,
   streamError: false,
+  traceGaps: [],
+  clientDroppedRecords: 0,
+  backendOldestRecordId: 0,
+  backendLatestRecordId: 0,
+  backendDroppedStreamRecords: 0,
+  backendSlowClientDisconnects: 0,
   mode: "live",
   paused: false,
   pendingRecords: [],
@@ -191,6 +216,7 @@ export const useTraceStore = create<Store>((set, get) => ({
   tickFilterBuckets: [],
   recordings: [],
   activeRecording: null,
+  recordingLoadError: null,
   liveSessionId: null,
   liveLastVisibleAt: Date.now(),
   liveWarmupState: "ready",
@@ -222,12 +248,13 @@ export const useTraceStore = create<Store>((set, get) => ({
   async connect(backfillLimit = BACKFILL_LIMIT) {
     const { client } = get();
     get().disconnect();
-    set({ connection: "connecting", mockMode: false, streamError: false });
+    discardPendingBufferForRecovery();
+    set({ connection: "connecting", mockMode: false, streamError: false, ...traceIntegrityPatch() });
 
     try {
       const health = await client.health();
       resetLiveSessionIfNeeded(health.sessionId);
-      set({ liveCurrentTick: health.currentTick ?? 0 });
+      set({ liveCurrentTick: health.currentTick ?? 0, ...healthIntegrityPatch(health) });
     } catch {
       // Backend unreachable. Fall back to mock only if the user explicitly pointed at "mock".
       if (get().baseUrl !== "mock") {
@@ -241,6 +268,9 @@ export const useTraceStore = create<Store>((set, get) => ({
         return;
       }
       set({ mockMode: true });
+      const health = await client.health();
+      resetLiveSessionIfNeeded(health.sessionId);
+      set({ liveCurrentTick: health.currentTick ?? 0, ...healthIntegrityPatch(health) });
     }
 
     set({ connection: "open", streamError: false });
@@ -249,13 +279,15 @@ export const useTraceStore = create<Store>((set, get) => ({
     // storm on connect that froze the UI under high-throughput backends.
     try {
       const back = await client.records({ limit: Math.min(RESUME_BACKFILL_LIMIT, Math.max(1, backfillLimit)), tail: true });
-      const list = pruneLiveRecords(back.records ?? []);
+      const incoming = (back.records ?? []).slice().sort((a, b) => a.id - b.id);
+      for (const record of incoming) observeRecordIntegrity(record.id);
+      const list = pruneLiveRecords(incoming);
       const range = computeRange(list);
       const node = traceNode(list, range, lastWindow(range));
       if (get().mode === "live") {
-        set({ liveNode: node, ...node, pendingRecords: [] });
+        set({ liveNode: node, ...node, pendingRecords: [], ...traceIntegrityPatch() });
       } else {
-        set({ liveNode: node, pendingRecords: [] });
+        set({ liveNode: node, pendingRecords: [], ...traceIntegrityPatch() });
       }
     } catch {
       /* keep last good data visible (docs :784) */
@@ -271,7 +303,7 @@ export const useTraceStore = create<Store>((set, get) => ({
           for (const record of msg.records) get().ingestRecord(record);
         } else if (msg.type === "hello") {
           resetLiveSessionIfNeeded(msg.sessionId);
-          set({ liveCurrentTick: msg.currentTick ?? 0 });
+          set({ liveCurrentTick: msg.currentTick ?? 0, ...healthIntegrityPatch(msg) });
         }
       },
       () => {
@@ -288,7 +320,8 @@ export const useTraceStore = create<Store>((set, get) => ({
       if (state.mode !== "live") return;
       if (state.connection !== "open" && state.connection !== "reconnecting") return;
       if (state.mockMode) return;
-      const last = state.records.length ? state.records[state.records.length - 1].id : 0;
+      const gap = nextRecoveringTraceGap(liveTraceGaps);
+      const last = gap ? gap.fromId - 1 : liveHighestObservedId;
       try {
         const back = await state.client.records({ after: last, limit: 1000 });
         for (const r of back.records ?? []) state.ingestRecord(r);
@@ -321,8 +354,8 @@ export const useTraceStore = create<Store>((set, get) => ({
     if (state.mode !== "live") return;
     if (!state.paused) {
       stopLiveStream();
-      clearPendingBuffer();
-      set({ paused: true, pendingRecords: [] });
+      discardPendingBufferForRecovery();
+      set({ paused: true, pendingRecords: [], ...traceIntegrityPatch() });
       return;
     }
 
@@ -410,6 +443,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     const livePatch = {
       mode: "live" as const,
       activeRecording: null,
+      recordingLoadError: null,
       relationshipGraphRequest: null,
       liveWarmupState: shouldWarm ? "warming" as const : "ready" as const,
       ...state.liveNode,
@@ -435,6 +469,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       connection: "disconnected",
       paused: false,
       activeRecording: null,
+      recordingLoadError: null,
       ...empty,
       pendingRecords: [],
       relationshipGraphRequest: null,
@@ -442,7 +477,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       liveWarmupState: "idle",
     });
     pendingIds.clear();
-    clearPendingBuffer();
+    discardPendingBufferForRecovery();
     if (!statusTimer) {
       statusTimer = window.setInterval(() => {
         void get().pollRecordingStatus();
@@ -474,14 +509,27 @@ export const useTraceStore = create<Store>((set, get) => ({
   },
 
   async loadRecording(rec) {
+    if ((rec.sizeBytes ?? 0) > MAX_SAFE_REPLAY_BYTES) {
+      set({
+        recordingLoadError:
+          `Recording ${rec.id} is too large for safe in-browser replay ` +
+          `(${formatBytes(rec.sizeBytes ?? 0)}; limit ${formatBytes(MAX_SAFE_REPLAY_BYTES)}).`,
+      });
+      return;
+    }
     stopLiveStream();
+    set({ recordingLoadError: null });
     let payload;
     try {
       payload = await get().client.recording(rec.id);
     } catch {
+      set({ recordingLoadError: `Failed to load recording ${rec.id}.` });
       return;
     }
-    if (!payload.recording) return;
+    if (!payload.recording) {
+      set({ recordingLoadError: `Recording ${rec.id} is no longer available.` });
+      return;
+    }
     const list = dedupeById(
       payload.records ?? [
         ...payload.data.commands,
@@ -502,6 +550,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       pendingRecords: [],
       tickFilterBuckets: payload.data.tickFilter ?? [],
       relationshipGraphRequest: null,
+      recordingLoadError: null,
     });
     pendingIds.clear();
     clearPendingBuffer();
@@ -548,7 +597,8 @@ export const useTraceStore = create<Store>((set, get) => ({
     if (state.connection !== "open" && state.connection !== "reconnecting") return;
     try {
       const health = await state.client.health();
-      set({ liveCurrentTick: health.currentTick ?? 0 });
+      resetLiveSessionIfNeeded(health.sessionId);
+      set({ liveCurrentTick: health.currentTick ?? 0, ...healthIntegrityPatch(health) });
     } catch {
       /* ignore; next tick retries */
     }
@@ -560,12 +610,21 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   ingestRecord(r) {
     const cur = get();
-    const liveIndexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
-    if (liveIndexes.recordsById.has(r.id) || pendingIds.has(r.id)) return;
     if (cur.paused) return;
+    const integrityChanged = observeRecordIntegrity(r.id);
+    const liveIndexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
+    if (liveIndexes.recordsById.has(r.id) || pendingIds.has(r.id)) {
+      if (integrityChanged) set(traceIntegrityPatch());
+      return;
+    }
     pendingIds.add(r.id);
     const dropped = pendingBuffer.push(r);
-    if (dropped) pendingIds.delete(dropped.id);
+    if (dropped) {
+      pendingIds.delete(dropped.id);
+      liveTraceGaps = addTraceGap(liveTraceGaps, dropped.id, dropped.id);
+      clientDroppedRecords++;
+    }
+    if (integrityChanged || dropped) set(traceIntegrityPatch());
     scheduleFlush();
   },
 }));
@@ -639,6 +698,14 @@ function flushPending() {
   const pending = drainPendingBuffer();
   // Pending records already passed dedup at ingest time (against base + pending). Concatenate.
   let merged = pending.length ? [...baseRecords, ...pending] : baseRecords;
+  let reordered = false;
+  for (let index = 1; index < merged.length; index++) {
+    if (merged[index].id < merged[index - 1].id) {
+      merged = merged.slice().sort((a, b) => a.id - b.id);
+      reordered = true;
+      break;
+    }
+  }
 
   // Incremental index update: reuse the existing indexes and add only the new pending records.
   // This makes a flush cost O(pending) instead of O(total). The indexes object is mutated in
@@ -669,7 +736,7 @@ function flushPending() {
     ? { min: Math.max(fullRange.min, fullRange.max - cur.settings.liveRetentionTicks), max: fullRange.max }
     : fullRange;
   const newView = cur.autoScroll ? lastWindow(nr) : clampViewRange(baseViewRange, nr);
-  const finalIndexes = trimmed ? buildIndexes(merged) : indexes;
+  const finalIndexes = trimmed || reordered ? buildIndexes(merged) : indexes;
   const selection = sanitizeSelection(cur.selection, finalIndexes);
   const highlightIds = selection === cur.selection ? cur.highlightIds : new Set<number>();
   const node: TraceNodeState = {
@@ -701,6 +768,26 @@ function drainPendingBuffer(): TraceRecord[] {
 function clearPendingBuffer() {
   pendingBuffer.clear();
   pendingIds.clear();
+}
+
+function discardPendingBufferForRecovery() {
+  const discardedIds = pendingBuffer.drain().map((record) => record.id).sort((a, b) => a - b);
+  pendingIds.clear();
+  if (discardedIds.length === 0) return;
+
+  let fromId = discardedIds[0];
+  let toId = fromId;
+  for (let index = 1; index < discardedIds.length; index++) {
+    const id = discardedIds[index];
+    if (id <= toId + 1) {
+      toId = Math.max(toId, id);
+      continue;
+    }
+    liveTraceGaps = addTraceGap(liveTraceGaps, fromId, toId);
+    fromId = id;
+    toId = id;
+  }
+  liveTraceGaps = addTraceGap(liveTraceGaps, fromId, toId);
 }
 
 function emptyTraceNode(): TraceNodeState {
@@ -922,6 +1009,9 @@ function resetLiveSessionIfNeeded(sessionId: number) {
   if (sessionId == null) return;
   const state = useTraceStore.getState();
   if (state.liveSessionId === sessionId) return;
+  liveHighestObservedId = 0;
+  liveTraceGaps = [];
+  clientDroppedRecords = 0;
   const empty = emptyTraceNode();
   useTraceStore.setState({
     liveSessionId: sessionId,
@@ -930,8 +1020,49 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     tickFilterBuckets: [],
     liveCurrentTick: 0,
     relationshipGraphRequest: null,
+    traceGaps: [],
+    clientDroppedRecords: 0,
+    backendOldestRecordId: 0,
+    backendLatestRecordId: 0,
+    backendDroppedStreamRecords: 0,
+    backendSlowClientDisconnects: 0,
     ...(state.mode === "live" ? empty : {}),
   });
   pendingIds.clear();
   clearPendingBuffer();
+}
+
+function observeRecordIntegrity(recordId: number): boolean {
+  const previous = liveTraceGaps;
+  const result = observeTraceRecord(liveTraceGaps, liveHighestObservedId, recordId);
+  liveTraceGaps = result.gaps;
+  liveHighestObservedId = result.highestObservedId;
+  return liveTraceGaps !== previous;
+}
+
+function traceIntegrityPatch(): Pick<Store, "traceGaps" | "clientDroppedRecords"> {
+  return { traceGaps: liveTraceGaps, clientDroppedRecords };
+}
+
+function healthIntegrityPatch(health: HealthResponse): Partial<Store> {
+  liveTraceGaps = markTraceGapsUnavailableBefore(liveTraceGaps, health.oldestRecordId ?? 0);
+  return {
+    ...traceIntegrityPatch(),
+    backendOldestRecordId: health.oldestRecordId ?? 0,
+    backendLatestRecordId: health.latestRecordId ?? 0,
+    backendDroppedStreamRecords: health.droppedStreamRecords ?? 0,
+    backendSlowClientDisconnects: health.slowClientDisconnects ?? 0,
+  };
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let scaled = value;
+  let unit = -1;
+  do {
+    scaled /= 1024;
+    unit++;
+  } while (scaled >= 1024 && unit < units.length - 1);
+  return `${scaled.toFixed(scaled >= 10 ? 0 : 1)} ${units[unit]}`;
 }

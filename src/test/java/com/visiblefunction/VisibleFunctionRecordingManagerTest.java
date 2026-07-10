@@ -42,6 +42,8 @@ class VisibleFunctionRecordingManagerTest {
 		assertNotEquals(firstId, secondId);
 		assertEquals(2, countFiles(".json"));
 		assertTrue(JsonParser.parseString(manager.recordingJson(firstId)).isJsonObject());
+		var recordings = JsonParser.parseString(manager.recordingsJson()).getAsJsonObject().getAsJsonArray("recordings");
+		assertTrue(recordings.get(0).getAsJsonObject().get("sizeBytes").getAsLong() > 0);
 		assertEquals(0, countFiles(".part"));
 		assertEquals(0, countFiles(".journal.tmp"));
 	}

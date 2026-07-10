@@ -475,6 +475,7 @@ final class VisibleFunctionRecordingManager {
 			endedAtMillis,
 			file,
 			scan.records(),
+			Files.size(file),
 			recovered,
 			stopReason
 		);
@@ -543,6 +544,7 @@ final class VisibleFunctionRecordingManager {
 			endedAtMillis,
 			file,
 			scan.records(),
+			Files.size(file),
 			true,
 			"recovered_legacy_journal"
 		);
@@ -783,6 +785,7 @@ final class VisibleFunctionRecordingManager {
 		property(json, "durationMillis", Math.max(0, recording.endedAtMillis() - recording.startedAtMillis())).append(',');
 		property(json, "file", recording.file().toString()).append(',');
 		property(json, "records", recording.recordCount()).append(',');
+		property(json, "sizeBytes", recording.sizeBytes()).append(',');
 		property(json, "recovered", recording.recovered()).append(',');
 		property(json, "stopReason", recording.stopReason());
 		json.append('}');
@@ -841,6 +844,7 @@ final class VisibleFunctionRecordingManager {
 				longField(metadata, "endedAtMillis", modified),
 				file,
 				(int) longField(metadata, "records", 0),
+				Files.size(file),
 				booleanField(metadata, "recovered", false),
 				stringField(metadata, "stopReason", "unknown")
 			);
@@ -1168,6 +1172,7 @@ final class VisibleFunctionRecordingManager {
 		long endedAtMillis,
 		Path file,
 		int recordCount,
+		long sizeBytes,
 		boolean recovered,
 		String stopReason
 	) {

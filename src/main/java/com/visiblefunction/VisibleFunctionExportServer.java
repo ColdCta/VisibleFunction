@@ -53,6 +53,8 @@ final class VisibleFunctionExportServer {
 	private final BlockingDeque<ExportRecord> pendingRecords = new LinkedBlockingDeque<>(MAX_PENDING_STREAM_RECORDS);
 	private final AtomicLong nextRecordId = new AtomicLong(1);
 	private final AtomicLong nextSessionId = new AtomicLong(System.currentTimeMillis());
+	private final AtomicLong droppedStreamRecords = new AtomicLong();
+	private final AtomicLong slowClientDisconnects = new AtomicLong();
 	private volatile ServerSocket serverSocket;
 	private volatile boolean running;
 	private volatile int port;
@@ -79,6 +81,8 @@ final class VisibleFunctionExportServer {
 			tickFilterEngine.clear();
 		}
 		nextRecordId.set(1);
+		droppedStreamRecords.set(0);
+		slowClientDisconnects.set(0);
 		sessionId = nextSessionId.getAndIncrement();
 		currentTick = 0;
 
@@ -136,6 +140,18 @@ final class VisibleFunctionExportServer {
 		}
 	}
 
+	private long oldestRecordId() {
+		synchronized (recordsLock) {
+			return records.isEmpty() ? 0 : records.getFirst().id();
+		}
+	}
+
+	private long latestRecordId() {
+		synchronized (recordsLock) {
+			return records.isEmpty() ? 0 : records.getLast().id();
+		}
+	}
+
 	long sessionId() {
 		return sessionId;
 	}
@@ -174,7 +190,9 @@ final class VisibleFunctionExportServer {
 
 	private void offerPendingRecord(ExportRecord record) {
 		while (!pendingRecords.offerLast(record)) {
-			pendingRecords.pollFirst();
+			if (pendingRecords.pollFirst() != null) {
+				droppedStreamRecords.incrementAndGet();
+			}
 		}
 	}
 
@@ -212,6 +230,7 @@ final class VisibleFunctionExportServer {
 					// full it has fallen too far behind, so drop it.
 					if (!client.offer(eventName, eventJson)) {
 						clients.remove(client);
+						slowClientDisconnects.incrementAndGet();
 						client.close();
 					}
 				}
@@ -254,7 +273,7 @@ final class VisibleFunctionExportServer {
 
 			switch (path) {
 				case "/", "/index.html" -> writeFrontendResource(socket, path);
-				case "/health" -> writeJson(socket, VisibleFunctionExportJson.health(running, port, recordCount(), sessionId, currentTick));
+				case "/health" -> writeJson(socket, healthJson());
 				case "/api/v1/records" -> writeJson(socket, recordsResponse(query));
 				case "/api/v1/grouped" -> writeJson(socket, groupedResponse(query));
 				case "/api/v1/tick-filter" -> writeJson(socket, tickFilterResponse(query));
@@ -287,6 +306,20 @@ final class VisibleFunctionExportServer {
 
 	private String recordsResponse(String query) {
 		return VisibleFunctionExportJson.records(selectedRecords(query));
+	}
+
+	private String healthJson() {
+		return VisibleFunctionExportJson.health(
+			running,
+			port,
+			recordCount(),
+			sessionId,
+			currentTick,
+			oldestRecordId(),
+			latestRecordId(),
+			droppedStreamRecords.get(),
+			slowClientDisconnects.get()
+		);
 	}
 
 	private String groupedResponse(String query) {
@@ -362,7 +395,7 @@ final class VisibleFunctionExportServer {
 			// Prime with the current health snapshot, then hand the socket to the client's own
 			// writer loop. Every socket write happens on this thread, so a blocked write only ever
 			// stalls this one client — the broadcast loop merely enqueues frames.
-			client.writeHello(VisibleFunctionExportJson.health(running, port, recordCount(), sessionId, currentTick));
+			client.writeHello(healthJson());
 			client.runUntilClosed(this::running);
 		} finally {
 			clients.remove(client);

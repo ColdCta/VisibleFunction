@@ -255,7 +255,18 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
     const limit = Number(u.searchParams.get("limit") ?? "5000");
     const tail = u.searchParams.get("tail") === "true" || u.searchParams.get("tail") === "1";
     if (path === "/health") {
-      const body: HealthResponse = { running: true, port: 17654, records: records.length, sessionId: 1, currentTick: mockCurrentTick };
+      const body: HealthResponse = {
+        protocolVersion: 2,
+        running: true,
+        port: 17654,
+        records: records.length,
+        sessionId: 1,
+        currentTick: mockCurrentTick,
+        oldestRecordId: records[0]?.id ?? 0,
+        latestRecordId: records.at(-1)?.id ?? 0,
+        droppedStreamRecords: 0,
+        slowClientDisconnects: 0,
+      };
       return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
     }
     if (path === "/api/v1/records") {
@@ -295,6 +306,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
           durationMillis: Math.max(0, lastTs - startedAt),
           file: "mock",
           records: records.length,
+          sizeBytes: new Blob([JSON.stringify(records)]).size,
           format: "records-v1",
         }],
       }), { headers: { "Content-Type": "application/json" } });
@@ -367,7 +379,9 @@ function selectMockRecords(records: TraceRecord[], after: number, limit: number,
   return records.filter((r) => r.id > after).slice(0, limit);
 }
 
-const mockListeners = new Set<(m: { type: "record"; record: TraceRecord } | { type: "hello"; running: boolean; port: number; records: number; sessionId: number; currentTick: number }) => void>();
+type MockStreamMessage = { type: "record"; record: TraceRecord } | ({ type: "hello" } & HealthResponse);
+
+const mockListeners = new Set<(m: MockStreamMessage) => void>();
 
 // Polyfill EventSource for mock mode only. Installed by applyMockServer; removed by stopMockServer.
 class MockEventSourceImpl {
@@ -377,14 +391,26 @@ class MockEventSourceImpl {
   private closeFn: (() => void) | null = null;
   constructor(url: string) {
     this.url = url;
-    const handler = (m: { type: "record"; record: TraceRecord } | { type: "hello"; running: boolean; port: number; records: number; sessionId: number; currentTick: number }) => {
-      const payload = m.type === "record" ? m.record : { running: m.running, port: m.port, records: m.records, sessionId: m.sessionId, currentTick: m.currentTick };
+    const handler = (m: MockStreamMessage) => {
+      const payload = m.type === "record" ? m.record : { ...m, type: undefined };
       const ev = new MessageEvent("message", { data: JSON.stringify(payload) });
       const cb = this.listeners[m.type];
       if (cb) cb(ev);
     };
     mockListeners.add(handler);
-    setTimeout(() => handler({ type: "hello", running: true, port: 17654, records: 0, sessionId: 1, currentTick: mockCurrentTick }), 50);
+    setTimeout(() => handler({
+      type: "hello",
+      protocolVersion: 2,
+      running: true,
+      port: 17654,
+      records: 0,
+      sessionId: 1,
+      currentTick: mockCurrentTick,
+      oldestRecordId: 0,
+      latestRecordId: 0,
+      droppedStreamRecords: 0,
+      slowClientDisconnects: 0,
+    }), 50);
     this.closeFn = () => mockListeners.delete(handler);
   }
   addEventListener(type: string, cb: (ev: MessageEvent) => void) {

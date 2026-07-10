@@ -3,6 +3,7 @@ import { useTraceStore } from "../store/traceStore";
 import { normalizeRecordingStatus } from "../api/types";
 import { DEFAULT_BASE_URL } from "../api/visibleFunctionClient";
 import type { TraceRecord } from "../api/types";
+import { traceGapCount } from "../store/traceGaps";
 
 export function TopBar() {
   const paused = useTraceStore((s) => s.paused);
@@ -19,6 +20,10 @@ export function TopBar() {
   const openRecordings = useTraceStore((s) => s.openRecordings);
   const openDatapackGraph = useTraceStore((s) => s.openDatapackGraph);
   const streamError = useTraceStore((s) => s.streamError);
+  const traceGaps = useTraceStore((s) => s.traceGaps);
+  const clientDroppedRecords = useTraceStore((s) => s.clientDroppedRecords);
+  const backendDroppedStreamRecords = useTraceStore((s) => s.backendDroppedStreamRecords);
+  const backendSlowClientDisconnects = useTraceStore((s) => s.backendSlowClientDisconnects);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [urlDraft, setUrlDraft] = useState(baseUrl);
@@ -26,6 +31,22 @@ export function TopBar() {
   const norm = recordingStatus ? normalizeRecordingStatus(recordingStatus) : null;
   const isRecording = norm?.active ?? false;
   const traceActionsDisabled = mode === "datapack";
+  const recoveringRecords = traceGapCount(traceGaps, "recovering");
+  const lostRecords = traceGapCount(traceGaps, "lost");
+  const transportDrops = clientDroppedRecords + backendDroppedStreamRecords;
+  const integrityMessage = mode !== "live"
+    ? null
+    : lostRecords > 0
+    ? `trace data loss · ${lostRecords.toLocaleString()} unavailable`
+    : recoveringRecords > 0
+      ? `trace gap · recovering ${recoveringRecords.toLocaleString()}`
+      : streamError
+        ? "stream error · retrying"
+        : transportDrops > 0
+          ? `stream recovered · ${transportDrops.toLocaleString()} dropped`
+          : backendSlowClientDisconnects > 0
+            ? `stream reconnects · ${backendSlowClientDisconnects.toLocaleString()} slow client`
+            : null;
 
   return (
     <header className="topbar">
@@ -85,9 +106,12 @@ export function TopBar() {
         )}
       </div>
 
-      {streamError && (
-        <div className="topbar__warn" title="SSE stream error — showing last good data, retrying">
-          stream error · retrying
+      {integrityMessage && (
+        <div
+          className="topbar__warn"
+          title={`Transport drops: ${transportDrops}; slow-client reconnects: ${backendSlowClientDisconnects}`}
+        >
+          {integrityMessage}
         </div>
       )}
 

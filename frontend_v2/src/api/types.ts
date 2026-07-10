@@ -28,6 +28,7 @@ export type TraceRecord = {
 };
 
 export type HealthResponse = {
+  protocolVersion: number;
   running: boolean;
   port: number;
   records: number;
@@ -35,6 +36,10 @@ export type HealthResponse = {
   // Live game tick (server.overworld().getGameTime()), pushed every server tick even when no
   // events fire — lets the UI show how many ticks passed with no records instead of freezing.
   currentTick: number;
+  oldestRecordId: number;
+  latestRecordId: number;
+  droppedStreamRecords: number;
+  slowClientDisconnects: number;
 };
 
 export type GroupedResponse = {
@@ -114,6 +119,7 @@ export type RecordingMetadata = {
   durationMillis: number;
   file: string;
   records: number;
+  sizeBytes?: number;
   format?: string;
   recovered?: boolean;
   stopReason?: string;

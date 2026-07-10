@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useTraceStore } from "../store/traceStore";
+import { MAX_SAFE_REPLAY_BYTES, useTraceStore } from "../store/traceStore";
 import type { RecordingMetadata } from "../api/types";
 
 const RENDER_BATCH = 60; // render recordings in growing batches to bound DOM size (docs :791)
@@ -9,6 +9,7 @@ export function RecordingLibrary() {
   const loadRecording = useTraceStore((s) => s.loadRecording);
   const openRecordings = useTraceStore((s) => s.openRecordings);
   const recordingStatus = useTraceStore((s) => s.recordingStatus);
+  const recordingLoadError = useTraceStore((s) => s.recordingLoadError);
   const [visibleCount, setVisibleCount] = useState(RENDER_BATCH);
 
   // Load the list once on mount. The TopBar mode switch already calls openRecordings; this guards
@@ -43,6 +44,10 @@ export function RecordingLibrary() {
         <div className="recordings__banner">
           Recording is active in-game. Current segment: {recordingStatus?.activeRecords ?? "0"} records.
         </div>
+      )}
+
+      {recordingLoadError && (
+        <div className="recordings__banner">{recordingLoadError}</div>
       )}
 
       {recordings.length === 0 ? (
@@ -80,17 +85,21 @@ function RecordingCard({
   recording: RecordingMetadata;
   onOpen: () => void;
 }) {
+  const tooLarge = (recording.sizeBytes ?? 0) > MAX_SAFE_REPLAY_BYTES;
   return (
-    <button className="recording-card" onClick={onOpen}>
+    <button className="recording-card" onClick={onOpen} title={tooLarge ? "Replay is blocked until paged loading is available" : undefined}>
       <div className="recording-card__top">
         <span className="recording-card__id mono">{recording.id}</span>
         <span className="pill">{recording.records.toLocaleString()} records</span>
+        {tooLarge && <span className="pill rec">too large</span>}
       </div>
       <div className="recording-card__meta">
         <span>Started</span>
         <span className="mono">{formatDate(recording.startedAtMillis)}</span>
         <span>Duration</span>
         <span className="mono">{formatDuration(recording.durationMillis)}</span>
+        <span>Size</span>
+        <span className="mono">{recording.sizeBytes == null ? "unknown" : formatBytes(recording.sizeBytes)}</span>
         <span>File</span>
         <span className="mono recording-card__file">{recording.file}</span>
       </div>
@@ -107,4 +116,16 @@ function formatDuration(value: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let scaled = value;
+  let unit = -1;
+  do {
+    scaled /= 1024;
+    unit++;
+  } while (scaled >= 1024 && unit < units.length - 1);
+  return `${scaled.toFixed(scaled >= 10 ? 0 : 1)} ${units[unit]}`;
 }
