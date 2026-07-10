@@ -5,6 +5,7 @@ import type {
   HealthResponse,
   RecordingPayload,
   RecordingStatus,
+  TickFilterBucketPayload,
   TraceRecord,
 } from "../api/types";
 import type { VisibleFunctionClient } from "../api/visibleFunctionClient";
@@ -22,6 +23,12 @@ import type { VisibleFunctionClient } from "../api/visibleFunctionClient";
 // ---------------------------------------------------------------------------
 
 const MOCK_STORAGE_KEY = "visiblefunction.mock.records";
+const MOCK_TICK_FUNCTION = "wtw:fight_system/on_hit";
+const MOCK_FUNCTION_GROUP_ID = "11111111111111111111111111111111";
+const MOCK_COMMAND_GROUPS = new Map([
+  ["execute as @a[nbt={...}]", "22222222222222222222222222222222"],
+  ["data get entity @s Health", "33333333333333333333333333333333"],
+]);
 
 function rid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -237,6 +244,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
       /* ignore */
     }
   }
+  records.forEach(applyMockTickFilterMembership);
 
   let lastId = records.length ? records[records.length - 1].id : 0;
   let lastTs = records.length ? records[records.length - 1].timestampMillis : Date.now();
@@ -256,7 +264,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
     const tail = u.searchParams.get("tail") === "true" || u.searchParams.get("tail") === "1";
     if (path === "/health") {
       const body: HealthResponse = {
-        protocolVersion: 2,
+        protocolVersion: 3,
         running: true,
         port: 17654,
         records: records.length,
@@ -278,7 +286,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
       return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
     }
     if (path === "/api/v1/tick-filter") {
-      return new Response(JSON.stringify({ tickFilter: [] }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ tickFilter: makeMockTickFilter(records) }), { headers: { "Content-Type": "application/json" } });
     }
     if (path === "/api/v1/datapack-analysis") {
       return new Response(JSON.stringify(mockDatapackAnalysis()), { headers: { "Content-Type": "application/json" } });
@@ -334,6 +342,7 @@ export async function applyMockServer(client: VisibleFunctionClient): Promise<bo
       const active = mockPhase % 44 < 24;
       if (active) {
         const r = generateOne(++lastId, lastTs + 50);
+        applyMockTickFilterMembership(r);
         lastTs = r.timestampMillis;
         records.push(r);
         mockCurrentTick = Number(r.basicFields.tick) || mockCurrentTick;
@@ -400,7 +409,7 @@ class MockEventSourceImpl {
     mockListeners.add(handler);
     setTimeout(() => handler({
       type: "hello",
-      protocolVersion: 2,
+      protocolVersion: 3,
       running: true,
       port: 17654,
       records: 0,
@@ -471,18 +480,19 @@ function generateOne(id: number, ts: number): TraceRecord {
     };
   }
 
+  const command = id % 4 === 1 ? "data get entity @s Health" : "execute as @a[nbt={...}]";
   return {
     id,
     type: "COMMAND",
-    commandType: "execute",
+    commandType: command.startsWith("execute") ? "execute" : "data",
     eventAction: "execute_run",
     groups: ["commands"],
-    subject: "execute",
-    summary: "execute as @a[nbt={...}]",
+    subject: command.split(" ")[0],
+    summary: command,
     timestampMillis: ts,
     sessionId: 1,
     commandContext: {
-      command: "execute as @a[nbt={...}]",
+      command,
       commandId: `c-${id}`,
       source: "function",
       function: fn,
@@ -492,13 +502,13 @@ function generateOne(id: number, ts: number): TraceRecord {
       triggerFunction: trigger?.functionId,
     },
     basicFields: {
-      command: "execute as @a[nbt={...}]",
+      command,
       source: "function",
       function: fn,
       tick: String(tick),
       sequence: "1",
       action: "execute_run",
-      command_type: "execute",
+      command_type: command.startsWith("execute") ? "execute" : "data",
       trigger_type: trigger?.type ?? "none",
       trigger_id: trigger?.id ?? "none",
       trigger_function: trigger?.functionId ?? "none",
@@ -1050,6 +1060,88 @@ function makeGrouped(records: TraceRecord[]): GroupedResponse {
     commandsByType,
     eventsByAction,
     functionsById,
-    tickFilter: [],
+    tickFilter: makeMockTickFilter(records),
   };
+}
+
+function applyMockTickFilterMembership(record: TraceRecord) {
+  const groupIds: string[] = [];
+  if (record.commandContext.function === MOCK_TICK_FUNCTION) {
+    groupIds.push(MOCK_FUNCTION_GROUP_ID);
+    const commandGroupId = record.type === "COMMAND"
+      ? MOCK_COMMAND_GROUPS.get(record.commandContext.command)
+      : undefined;
+    if (commandGroupId) groupIds.push(commandGroupId);
+  }
+  record.tickFilterGroupIds = groupIds;
+  record.capturedTickFilterGroupIds = groupIds;
+}
+
+function makeMockTickFilter(records: TraceRecord[]): TickFilterBucketPayload[] {
+  const matching = records.filter((record) => record.commandContext.function === MOCK_TICK_FUNCTION);
+  if (matching.length === 0) return [];
+  const currentTick = Math.max(...records.map(mockRecordTick));
+  const parent = mockBucket(
+    MOCK_FUNCTION_GROUP_ID,
+    `FUNCTION:${MOCK_TICK_FUNCTION}`,
+    "FUNCTION",
+    MOCK_TICK_FUNCTION,
+    matching,
+    undefined,
+    currentTick
+  );
+  const children = Array.from(MOCK_COMMAND_GROUPS.entries()).flatMap(([command, groupId]) => {
+    const childRecords = matching.filter(
+      (record) => record.type === "COMMAND" && record.commandContext.command === command
+    );
+    return childRecords.length === 0 ? [] : [mockBucket(
+      groupId,
+      `COMMAND:${command}|function|${MOCK_TICK_FUNCTION}`,
+      "COMMAND",
+      command,
+      childRecords,
+      MOCK_FUNCTION_GROUP_ID,
+      currentTick
+    )];
+  });
+  return [parent, ...children];
+}
+
+function mockBucket(
+  groupId: string,
+  key: string,
+  type: "FUNCTION" | "COMMAND",
+  displayName: string,
+  records: TraceRecord[],
+  parentGroupId: string | undefined,
+  currentTick: number
+): TickFilterBucketPayload {
+  const ticks = records.map(mockRecordTick);
+  const firstSeenTick = Math.min(...ticks);
+  const lastSeenTick = Math.max(...ticks);
+  const recent = records.slice(-8192);
+  return {
+    groupId,
+    key,
+    type,
+    displayName,
+    functionId: MOCK_TICK_FUNCTION,
+    parentGroupId,
+    firstSeenTick,
+    lastSeenTick,
+    startMillis: records[0].timestampMillis,
+    endMillis: records.at(-1)?.timestampMillis ?? records[0].timestampMillis,
+    totalCount: records.length,
+    countLastSecond: records.filter((record) => currentTick - mockRecordTick(record) <= 20).length,
+    sourceSummary: `tick function ${MOCK_TICK_FUNCTION}`,
+    reason: "tick function + high frequency",
+    active: true,
+    recordIds: recent.map((record) => record.id),
+    commandIds: Array.from(new Set(recent.map((record) => record.commandContext.commandId).filter((id) => id !== "none"))),
+    sampleRecords: recent.slice(-6),
+  };
+}
+
+function mockRecordTick(record: TraceRecord): number {
+  return Number(record.basicFields.tick ?? record.detailedFields.tick ?? 0);
 }

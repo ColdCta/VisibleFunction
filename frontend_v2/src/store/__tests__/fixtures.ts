@@ -11,6 +11,8 @@ export type RecordInput = {
   commandContext?: Partial<TraceRecord["commandContext"]>;
   basicFields?: Record<string, string>;
   detailedFields?: Record<string, string>;
+  tickFilterGroupIds?: string[];
+  capturedTickFilterGroupIds?: string[];
 };
 
 // Builds a TraceRecord with sensible "none"/empty defaults so tests only spell out the fields that
@@ -39,6 +41,8 @@ export function makeRecord(input: RecordInput): TraceRecord {
     },
     basicFields: input.basicFields ?? {},
     detailedFields: input.detailedFields ?? {},
+    tickFilterGroupIds: input.tickFilterGroupIds,
+    capturedTickFilterGroupIds: input.capturedTickFilterGroupIds,
   };
 }
 

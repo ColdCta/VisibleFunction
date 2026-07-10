@@ -1,10 +1,10 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTraceStore } from "../../store/traceStore";
 import type { TraceTickSummary } from "../../store/traceStore";
 import { selectViewModel } from "../../store/selectors";
-import { BUCKET_SIZES, formatBucketHeader } from "../../store/timelineBuckets";
-import type { TickFilterBand, TimelineBucket, TraceRecord } from "../../api/types";
+import { autoBucketTicks, BUCKET_SIZES, formatBucketHeader } from "../../store/timelineBuckets";
+import type { TimelineBucket, TraceRecord } from "../../api/types";
 import { recordTick } from "../../store/traceTime";
 import {
   effectiveAction,
@@ -13,12 +13,14 @@ import {
   triggerSourceKey,
 } from "../../store/recordNorm";
 import { FunctionCard } from "./FunctionCard";
+import { FilteredActivityPanel } from "../FilteredActivityPanel";
 
-const COLUMN_WIDTH = 220;
+const LANE_LABEL_WIDTH = 200;
+const MIN_COLUMN_WIDTH = 120;
+const MAX_COLUMN_WIDTH = 180;
 const EMPTY_VIEW_MODEL = {
   filtered: [],
   buckets: [],
-  tickFilterBands: [],
   totalCommands: 0,
   totalEvents: 0,
   totalFunctions: 0,
@@ -31,8 +33,9 @@ export function Timeline() {
   const stats = useTraceStore((s) => s.stats);
   const liveWarmupState = useTraceStore((s) => s.liveWarmupState);
   const filters = useTraceStore((s) => s.filters);
-  const bucketTicks = useTraceStore((s) => s.bucketTicks);
+  const bucketMode = useTraceStore((s) => s.bucketMode);
   const setBucket = useTraceStore((s) => s.setBucket);
+  const setBucketMode = useTraceStore((s) => s.setBucketMode);
   const autoScroll = useTraceStore((s) => s.autoScroll);
   const setAutoScroll = useTraceStore((s) => s.setAutoScroll);
   const viewRange = useTraceStore((s) => s.viewRange);
@@ -44,6 +47,8 @@ export function Timeline() {
   const highlightIds = useTraceStore((s) => s.highlightIds);
   const connection = useTraceStore((s) => s.connection);
   const tickFilterBuckets = useTraceStore((s) => s.tickFilterBuckets);
+  const capturedTickFilterGroupIds = useTraceStore((s) => s.capturedTickFilterGroupIds);
+  const revealedTickFilterGroupIds = useTraceStore((s) => s.revealedTickFilterGroupIds);
   const mode = useTraceStore((s) => s.mode);
   const paused = useTraceStore((s) => s.paused);
   const liveCurrentTick = useTraceStore((s) => s.liveCurrentTick);
@@ -53,27 +58,50 @@ export function Timeline() {
   const [scrollState, setScrollState] = useState({ scrollLeft: 0, scrollWidth: 1, clientWidth: 1 });
   const warming = liveWarmupState === "warming";
 
+  const displayRange = useMemo(() => {
+    if (mode !== "live" || !autoScroll) return viewRange;
+    const configuredSpan = viewRange.max - viewRange.min;
+    const span = Number.isFinite(configuredSpan) && configuredSpan > 0 ? configuredSpan : 200;
+    const max = Math.max(liveCurrentTick, range.max);
+    return { min: Math.max(0, max - span), max };
+  }, [autoScroll, liveCurrentTick, mode, range.max, viewRange]);
+
+  const effectiveBucketTicks = useMemo(() => {
+    if (bucketMode !== "auto") return bucketMode;
+    return autoBucketTicks(Math.max(1, displayRange.max - displayRange.min), 10);
+  }, [bucketMode, displayRange]);
+
   const vm = useMemo(
-    () => warming ? EMPTY_VIEW_MODEL : selectViewModel(records, indexes, filters, bucketTicks, viewRange, tickFilterBuckets),
-    [records, indexes, filters, bucketTicks, viewRange, tickFilterBuckets, warming]
+    () => warming ? EMPTY_VIEW_MODEL : selectViewModel(
+      records,
+      indexes,
+      filters,
+      effectiveBucketTicks,
+      displayRange,
+      tickFilterBuckets,
+      capturedTickFilterGroupIds,
+      revealedTickFilterGroupIds
+    ),
+    [
+      records,
+      indexes,
+      filters,
+      effectiveBucketTicks,
+      displayRange,
+      tickFilterBuckets,
+      capturedTickFilterGroupIds,
+      revealedTickFilterGroupIds,
+      warming,
+    ]
   );
 
-  const visibleBuckets = useMemo(() => {
-    if (!Number.isFinite(viewRange.min) || !Number.isFinite(viewRange.max)) return vm.buckets;
-    // Use <= on the max boundary so the bucket containing the latest tick (startTick ===
-    // viewRange.max in live mode) is included. With < it was excluded, hiding the newest frame.
-    return vm.buckets.filter((b) => b.endTick > viewRange.min && b.startTick <= viewRange.max);
-  }, [vm.buckets, viewRange]);
+  const visibleBuckets = vm.buckets;
 
-  // The "current" frame is the latest tick in the dataset, NOT the last filtered bucket. When
-  // hideHighFreq removes every record from the newest tick, that bucket drops out of vm.buckets,
-  // but the TICK lane must still mark the live edge. Derive the key from range.max so the marker
-  // keeps updating regardless of filtering.
   const currentBucketKey = useMemo(() => {
-    const latestTick = range.max;
-    if (records.length === 0) return visibleBuckets[visibleBuckets.length - 1]?.key;
-    return String(Math.floor(latestTick / bucketTicks));
-  }, [range.max, bucketTicks, visibleBuckets, records.length]);
+    const latestTick = mode === "live" ? Math.max(liveCurrentTick, range.max) : range.max;
+    if (!Number.isFinite(latestTick)) return undefined;
+    return String(Math.floor(latestTick / effectiveBucketTicks));
+  }, [effectiveBucketTicks, liveCurrentTick, mode, range.max]);
 
   // Server ticks elapsed since the newest record, with no events. The backend reports the live
   // game tick every server tick (health.currentTick), so when the game runs but emits nothing we
@@ -89,14 +117,20 @@ export function Timeline() {
   // Horizontal virtualization (docs :791). Only render the columns actually in (or near) the
   // scroll viewport, not every bucket in the view range. All four lanes share the same column
   // geometry, so a single virtualizer drives the slice for every lane.
+  const trackViewportWidth = Math.max(1, scrollState.clientWidth - LANE_LABEL_WIDTH - 32);
+  const columnWidth = Math.max(
+    MIN_COLUMN_WIDTH,
+    Math.min(MAX_COLUMN_WIDTH, Math.floor(trackViewportWidth / Math.max(1, visibleBuckets.length)))
+  );
   const colVirtualizer = useVirtualizer({
     horizontal: true,
     count: visibleBuckets.length,
     getScrollElement: () => scrollerRef.current,
-    estimateSize: () => COLUMN_WIDTH,
+    estimateSize: () => columnWidth,
+    paddingStart: LANE_LABEL_WIDTH,
     overscan: 6,
   });
-  const colStart = colVirtualizer.getVirtualItems()[0]?.start ?? 0;
+  const colStart = Math.max(0, (colVirtualizer.getVirtualItems()[0]?.start ?? LANE_LABEL_WIDTH) - LANE_LABEL_WIDTH);
   const visibleSlice = colVirtualizer.getVirtualItems().map((vi) => visibleBuckets[vi.index]);
 
   useEffect(() => {
@@ -104,7 +138,7 @@ export function Timeline() {
     const scroller = scrollerRef.current;
     if (!scroller) return;
     scroller.scrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  }, [autoScroll, visibleBuckets.length, viewRange.max]);
+  }, [autoScroll, visibleBuckets.length, displayRange.max]);
 
   // Sync scrollState with the native scrollbar so the read-only minimap viewport follows it.
   useEffect(() => {
@@ -136,7 +170,10 @@ export function Timeline() {
   }, []);
 
   function zoom(factor: number) {
-    const idx = BUCKET_SIZES.findIndex((b) => b.ticks === bucketTicks);
+    const exactIndex = BUCKET_SIZES.findIndex((b) => b.ticks === effectiveBucketTicks);
+    const idx = exactIndex >= 0
+      ? exactIndex
+      : BUCKET_SIZES.findIndex((b) => b.ticks >= effectiveBucketTicks);
     const next = BUCKET_SIZES[Math.max(0, Math.min(BUCKET_SIZES.length - 1, idx + factor))];
     setBucket(next.ticks);
   }
@@ -156,8 +193,8 @@ export function Timeline() {
     }
   }
 
-  const empty = visibleBuckets.length === 0;
-  const totalWidth = visibleBuckets.length * COLUMN_WIDTH;
+  const empty = visibleBuckets.length === 0 || (records.length === 0 && liveCurrentTick <= 0);
+  const totalWidth = colVirtualizer.getTotalSize();
 
   return (
     <main className="timeline">
@@ -172,7 +209,12 @@ export function Timeline() {
         <div className="row gap-6">
           <button onClick={() => zoom(-1)} title="Zoom in (smaller buckets)">−</button>
           <button onClick={() => zoom(1)} title="Zoom out (larger buckets)">+</button>
-          <select value={bucketTicks} onChange={(e) => setBucket(Number(e.target.value))} title="Bucket size">
+          <select
+            value={bucketMode}
+            onChange={(e) => setBucketMode(e.target.value === "auto" ? "auto" : Number(e.target.value))}
+            title="Bucket size"
+          >
+            <option value="auto">Auto ({effectiveBucketTicks} Ticks)</option>
             {BUCKET_SIZES.map((b) => (
               <option key={b.label} value={b.ticks}>{b.label}</option>
             ))}
@@ -198,12 +240,19 @@ export function Timeline() {
         ) : empty ? (
           <EmptyState connection={connection} />
         ) : (
-          <div className="buckets" style={{ width: totalWidth, minWidth: totalWidth }}>
+          <div
+            className="buckets"
+            style={{
+              width: totalWidth,
+              minWidth: totalWidth,
+              "--timeline-column-width": `${columnWidth}px`,
+            } as React.CSSProperties}
+          >
             {/* Offset spacer so virtualized columns align with their true scroll position. */}
             <div style={{ position: "absolute", left: 0, top: 0, height: 0, width: colStart }} aria-hidden />
             <BucketHeaderRow
               buckets={visibleSlice}
-              bucketTicks={bucketTicks}
+              bucketTicks={effectiveBucketTicks}
               currentBucketKey={currentBucketKey}
               idleTicks={idleTicks}
               offset={colStart}
@@ -237,19 +286,11 @@ export function Timeline() {
               currentBucketKey={currentBucketKey}
               offset={colStart}
             />
-            {filters.showTickCommands && (
-              <TickCommandsLane
-                bands={vm.tickFilterBands}
-                viewMinTick={visibleBuckets[0]?.startTick ?? 0}
-                viewMaxTick={visibleBuckets[visibleBuckets.length - 1]?.endTick ?? 0}
-                offset={colStart}
-                totalWidth={totalWidth}
-                onSelectRecord={(id) => setSelection({ kind: "record", id })}
-              />
-            )}
           </div>
         )}
       </div>
+
+      <FilteredActivityPanel />
 
       <Minimap
         summary={stats.tickSummary}
@@ -287,14 +328,11 @@ function BucketHeaderRow({
     <div className="buckets__row buckets__row--header" style={{ paddingLeft: offset }}>
       <div className="bucket__label-spacer" />
       {buckets.map((b) => {
-        const tick = b.records[0]?.basicFields.tick ?? b.records[0]?.detailedFields.tick;
-        const label = tick ? `Tick ${tick}` : formatBucketHeader(b, bucketTicks);
+        const label = formatBucketHeader(b, bucketTicks);
         const isCurrent = b.key === currentBucketKey;
         return (
-          <Fragment key={b.key}>
-            <div className={"bucket__header" + (isCurrent ? " bucket__header--current" : "")}>
-              {label}
-            </div>
+          <div key={b.key} className={"bucket__header" + (isCurrent ? " bucket__header--current" : "")}>
+            {label}
             {isCurrent && idleTicks > 0 && (
               <div
                 className="bucket__idle"
@@ -303,7 +341,7 @@ function BucketHeaderRow({
                 ＋{idleTicks.toLocaleString()} tick{idleTicks === 1 ? "" : "s"} skipped · no events
               </div>
             )}
-          </Fragment>
+          </div>
         );
       })}
     </div>
@@ -575,68 +613,6 @@ function CommandLane({
             </div>
           );
         })}
-      </div>
-    </div>
-  );
-}
-
-// TICK COMMANDS lane — audio-track style. Each high-frequency command group is a red horizontal
-// bar spanning its active tick range, stacked vertically like clips in a video editor's track.
-// Unlike the other lanes this is NOT bucket-cell based: it uses absolute positioning over a
-// continuous track so bars can span multiple buckets. Bands are never hidden from other lanes;
-// this lane is a dedicated overview of spammy commands.
-function TickCommandsLane({
-  bands,
-  viewMinTick,
-  viewMaxTick,
-  offset,
-  totalWidth,
-  onSelectRecord,
-}: {
-  bands: TickFilterBand[];
-  viewMinTick: number;
-  viewMaxTick: number;
-  offset: number;
-  totalWidth: number;
-  onSelectRecord: (id: number) => void;
-}) {
-  // Map band tick coordinates to percentages of the visible span. The container is offset by
-  // `offset` (the virtualized scroll position) so bars align with the other lanes' columns.
-  const span = viewMaxTick - viewMinTick || 1;
-  const ROW_HEIGHT = 14;
-  const MAX_ROWS = 8;
-  const visibleBands = bands.filter((b) => b.endMillis >= viewMinTick && b.startMillis <= viewMaxTick).slice(0, MAX_ROWS);
-  const hiddenCount = bands.length - visibleBands.length;
-
-  return (
-    <div className="lane lane--tick-commands">
-      <LaneLabel icon="!" title="TICK COMMANDS" subtitle="High-Frequency Spam" />
-      <div
-        className="lane__grid lane__grid--continuous"
-        style={{ paddingLeft: offset, width: totalWidth, minWidth: totalWidth, minHeight: visibleBands.length * ROW_HEIGHT + 8 }}
-      >
-        {visibleBands.map((band, i) => {
-          const leftPct = ((band.startMillis - viewMinTick) / span) * 100;
-          const widthPct = Math.max(1.5, ((band.endMillis - band.startMillis) / span) * 100);
-          const firstId = band.recordIds.values().next().value;
-          return (
-            <div
-              key={band.key}
-              className="tick-cmd-bar"
-              style={{ left: `${leftPct}%`, width: `${widthPct}%`, top: i * ROW_HEIGHT + 4 }}
-              title={`${band.displayName} | ${band.countPerSecond}/s, total ${band.totalCount}`}
-              onClick={() => { if (firstId !== undefined) onSelectRecord(firstId); }}
-            >
-              <span className="tick-cmd-bar__label">{band.displayName}</span>
-              <span className="tick-cmd-bar__rate">{band.countPerSecond}/s</span>
-            </div>
-          );
-        })}
-        {hiddenCount > 0 && (
-          <div className="tick-cmd-more" style={{ top: visibleBands.length * ROW_HEIGHT + 4 }}>
-            +{hiddenCount} more spam groups
-          </div>
-        )}
       </div>
     </div>
   );

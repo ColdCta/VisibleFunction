@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBuckets, buildRangeBuckets, formatBucketHeader } from "../timelineBuckets";
+import { autoBucketTicks, buildBuckets, buildRangeBuckets, formatBucketHeader } from "../timelineBuckets";
 import { commandAtTick, makeRecord } from "./fixtures";
 
 describe("buildBuckets", () => {
@@ -59,5 +59,17 @@ describe("formatBucketHeader", () => {
   it("renders a single tick label at bucket size 1", () => {
     const [bucket] = buildBuckets([commandAtTick(1, 7)], 1);
     expect(formatBucketHeader(bucket, 1)).toBe("Tick 7");
+  });
+});
+
+describe("autoBucketTicks", () => {
+  it("uses a 20-tick bucket for a 200-tick viewport", () => {
+    expect(autoBucketTicks(200)).toBe(20);
+  });
+
+  it("snaps zoomed viewports to the 1/2/5 scale", () => {
+    expect(autoBucketTicks(40)).toBe(5);
+    expect(autoBucketTicks(95)).toBe(10);
+    expect(autoBucketTicks(1_000)).toBe(100);
   });
 });

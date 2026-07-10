@@ -10,8 +10,7 @@ const filters: FilterState = {
   function: true,
   command: true,
   hideIdleTicks: false,
-  showTickCommands: true,
-  hideHighFreq: false,
+  showFilteredActivity: true,
   search: "",
 };
 
@@ -22,5 +21,34 @@ describe("selectViewModel", () => {
 
     expect(model.filtered.map((record) => record.id)).toEqual([1]);
     expect(model.buckets[0].startTick).toBe(0);
+  });
+
+  it("retroactively hides records after a captured group transition without collapsing the grid", () => {
+    const records = [commandAtTick(1, 120, { tickFilterGroupIds: ["group-a"] })];
+    const before = selectViewModel(
+      records,
+      buildIndexes(records),
+      filters,
+      20,
+      { min: 100, max: 299 },
+      [],
+      new Set(),
+      new Set()
+    );
+    const after = selectViewModel(
+      records,
+      buildIndexes(records),
+      filters,
+      20,
+      { min: 100, max: 299 },
+      [],
+      new Set(["group-a"]),
+      new Set()
+    );
+
+    expect(before.filtered).toHaveLength(1);
+    expect(after.filtered).toHaveLength(0);
+    expect(after.buckets).toHaveLength(10);
+    expect(after.buckets.map((bucket) => bucket.startTick)).toEqual([100, 120, 140, 160, 180, 200, 220, 240, 260, 280]);
   });
 });

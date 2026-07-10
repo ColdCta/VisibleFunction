@@ -43,10 +43,45 @@ class VisibleFunctionSecurityAndJsonTest {
 			2
 		)).getAsJsonObject();
 
-		assertEquals(2, health.get("protocolVersion").getAsInt());
+		assertEquals(3, health.get("protocolVersion").getAsInt());
 		assertEquals(81, health.get("oldestRecordId").getAsLong());
 		assertEquals(100, health.get("latestRecordId").getAsLong());
 		assertEquals(4, health.get("droppedStreamRecords").getAsLong());
 		assertEquals(2, health.get("slowClientDisconnects").getAsLong());
+	}
+
+	@Test
+	void protocolV3SerializesMembershipTickAndCanonicalBucketRelationships() {
+		VisibleFunctionEventPayload payload = new VisibleFunctionEventPayload(
+			"COMMAND",
+			"say hi",
+			"executed",
+			"- tick: 10\n- command: say hi\n- command_id: command-1\n- source: tick function\n- function: demo:tick\n",
+			"- tick: 10\n"
+		);
+		ExportRecord record = new ExportRecord(1, payload, 500, 7);
+		TickFilterEngine<ExportRecord> engine = new TickFilterEngine<>();
+		var result = engine.addDetailed(VisibleFunctionExportJson.tickFilterInput(record));
+		record.setTickFilterMembership(result);
+
+		var recordJson = JsonParser.parseString(VisibleFunctionExportJson.record(record)).getAsJsonObject();
+		assertEquals(2, recordJson.getAsJsonArray("tickFilterGroupIds").size());
+		assertEquals(2, recordJson.getAsJsonArray("capturedTickFilterGroupIds").size());
+
+		var tickJson = JsonParser.parseString(VisibleFunctionExportJson.tick(7, 15)).getAsJsonObject();
+		assertEquals(7, tickJson.get("sessionId").getAsLong());
+		assertEquals(15, tickJson.get("currentTick").getAsLong());
+
+		var buckets = JsonParser.parseString(
+			VisibleFunctionExportJson.tickFilterSnapshots(engine.snapshots(10))
+		).getAsJsonObject().getAsJsonArray("tickFilter");
+		assertTrue(buckets.asList().stream().allMatch(element -> element.getAsJsonObject().has("groupId")));
+		var command = buckets.asList().stream()
+			.map(element -> element.getAsJsonObject())
+			.filter(bucket -> "COMMAND".equals(bucket.get("type").getAsString()))
+			.findFirst()
+			.orElseThrow();
+		assertEquals("demo:tick", command.get("functionId").getAsString());
+		assertTrue(command.has("parentGroupId"));
 	}
 }

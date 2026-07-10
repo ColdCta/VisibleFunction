@@ -311,16 +311,14 @@ function FiltersPanel({
           <span style={{ flex: 1 }}>Hide Idle Ticks</span>
           <Switch checked={value.hideIdleTicks} onChange={(v) => onChange({ hideIdleTicks: v })} />
         </label>
-        <label className="filter-row" title="Show the TICK COMMANDS lane — high-frequency command spam rendered as red horizontal bars (audio-track style). On by default.">
+        <label className="filter-row" title="Captured groups are always hidden from ordinary lanes. This controls only the aggregate panel.">
           <span style={{ color: "var(--rec)" }}>≡</span>
-          <span style={{ flex: 1 }}>Tick Commands Lane</span>
-          <Switch checked={value.showTickCommands} onChange={(v) => onChange({ showTickCommands: v })} />
+          <span style={{ flex: 1 }}>Filtered Activity Panel</span>
+          <Switch checked={value.showFilteredActivity} onChange={(v) => onChange({ showFilteredActivity: v })} />
         </label>
-        <label className="filter-row" title="Hide high-frequency spam records from the other lanes. Filtered records stay visible in the TICK COMMANDS lane. Off by default.">
-          <span style={{ color: "var(--rec)" }}>⚠</span>
-          <span style={{ flex: 1 }}>Tick Filter (hide spam)</span>
-          <Switch checked={value.hideHighFreq} onChange={(v) => onChange({ hideHighFreq: v })} />
-        </label>
+        <div className="muted" style={{ padding: "4px 8px", fontSize: 10, lineHeight: 1.4 }}>
+          Captured Tick Function and high-frequency groups are hidden automatically.
+        </div>
       </div>
     </Panel>
   );

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { TickFilterBucketPayload } from "../../api/types";
-import { isTickFilteredRecord, tickFilterBandsFromPayload } from "../tickFilter";
+import {
+  isTickFilteredRecord,
+  tickFilterGroupsFromPayload,
+} from "../tickFilter";
 import { makeRecord } from "./fixtures";
 
 function bucket(over: Partial<TickFilterBucketPayload> = {}): TickFilterBucketPayload {
@@ -24,41 +27,70 @@ function bucket(over: Partial<TickFilterBucketPayload> = {}): TickFilterBucketPa
   };
 }
 
-describe("tickFilterBandsFromPayload", () => {
-  it("preserves the canonical backend tick range and counts, including tick zero", () => {
-    const [band] = tickFilterBandsFromPayload([bucket()]);
-    expect(band.startMillis).toBe(0);
-    expect(band.endMillis).toBe(21);
-    expect(band.countPerSecond).toBe(20);
-    expect(band.totalCount).toBe(21);
-  });
-
-  it("extracts function ids from function buckets", () => {
-    const [band] = tickFilterBandsFromPayload([
-      bucket({ key: "FUNCTION:demo:tick", type: "FUNCTION", sourceSummary: "tick function demo:tick" }),
-    ]);
-    expect(band.functionId).toBe("demo:tick");
-  });
-});
-
 describe("isTickFilteredRecord", () => {
-  const bands = tickFilterBandsFromPayload([bucket()]);
+  const buckets = [bucket()];
 
   it("returns false when there are no bands", () => {
     expect(isTickFilteredRecord(makeRecord({ id: 1 }), [])).toBe(false);
   });
 
   it("matches canonical record ids", () => {
-    expect(isTickFilteredRecord(makeRecord({ id: 1 }), bands)).toBe(true);
+    expect(isTickFilteredRecord(makeRecord({ id: 1 }), buckets)).toBe(true);
   });
 
   it("matches related command ids", () => {
     const record = makeRecord({ id: 99, commandContext: { commandId: "c1" } });
-    expect(isTickFilteredRecord(record, bands)).toBe(true);
+    expect(isTickFilteredRecord(record, buckets)).toBe(true);
   });
 
   it("uses backend membership for events too", () => {
     const event = makeRecord({ id: 2, type: "EVENT", commandContext: { commandId: "none" } });
-    expect(isTickFilteredRecord(event, bands)).toBe(true);
+    expect(isTickFilteredRecord(event, buckets)).toBe(true);
+  });
+
+  it("uses protocol-v3 group membership before legacy ids", () => {
+    const record = makeRecord({ id: 99, tickFilterGroupIds: ["group-a"] });
+    expect(isTickFilteredRecord(record, [], new Set(["group-a"]), new Set())).toBe(true);
+    expect(isTickFilteredRecord(record, [], new Set(["group-a"]), new Set(["group-a"]))).toBe(false);
+  });
+
+  it("reveals only the selected parent and child group ids", () => {
+    const selected = makeRecord({ id: 90, tickFilterGroupIds: ["child-a"] });
+    const other = makeRecord({ id: 91, tickFilterGroupIds: ["group-b"] });
+    const captured = new Set(["parent-a", "child-a", "group-b"]);
+    const revealed = new Set(["parent-a", "child-a"]);
+    expect(isTickFilteredRecord(selected, [], captured, revealed)).toBe(false);
+    expect(isTickFilteredRecord(other, [], captured, revealed)).toBe(true);
+  });
+});
+
+describe("tickFilterGroupsFromPayload", () => {
+  it("groups command and event buckets under their canonical function parent", () => {
+    const parent = bucket({
+      groupId: "function-group",
+      key: "FUNCTION:demo:tick",
+      type: "FUNCTION",
+      displayName: "demo:tick",
+      functionId: "demo:tick",
+    });
+    const command = bucket({
+      groupId: "command-group",
+      parentGroupId: "function-group",
+      functionId: "demo:tick",
+    });
+    const event = bucket({
+      groupId: "event-group",
+      key: "EVENT:score changed",
+      type: "EVENT",
+      displayName: "score changed",
+      parentGroupId: "function-group",
+      functionId: "demo:tick",
+    });
+
+    const groups = tickFilterGroupsFromPayload([command, event, parent]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].groupId).toBe("function-group");
+    expect(groups[0].children.map((child) => child.groupId)).toEqual(["command-group", "event-group"]);
+    expect(groups[0].allGroupIds).toEqual(["function-group", "command-group", "event-group"]);
   });
 });

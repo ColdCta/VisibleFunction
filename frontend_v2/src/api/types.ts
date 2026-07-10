@@ -13,6 +13,10 @@ export type TraceRecord = {
   // The backend always serializes sessionId (VisibleFunctionExportJson.java:35), so it is
   // required here even though docs/frontend-agent-brief.md §14 omits it.
   sessionId: number;
+  // Protocol-v3 canonical Tick Filter membership. Optional for protocol-v2 servers and legacy
+  // recordings; the frontend falls back to recordIds/commandIds when absent.
+  tickFilterGroupIds?: string[];
+  capturedTickFilterGroupIds?: string[];
   commandContext: {
     command: string;
     commandId: string;
@@ -33,8 +37,8 @@ export type HealthResponse = {
   port: number;
   records: number;
   sessionId: number;
-  // Live game tick (server.overworld().getGameTime()), pushed every server tick even when no
-  // events fire — lets the UI show how many ticks passed with no records instead of freezing.
+  // Live game tick (server.overworld().getGameTime()), pushed every five server ticks even when
+  // no events fire — lets the UI show how many ticks passed with no records instead of freezing.
   currentTick: number;
   oldestRecordId: number;
   latestRecordId: number;
@@ -357,12 +361,15 @@ export type VariableOccurrence = {
   command: string;
 };
 
-// Undocumented by the doc but implemented by the backend (VisibleFunctionExportJson.tickFilter).
-// Kept here for forward compatibility; Batch B wires it into the UI as an opt-in feature.
+// Canonical protocol-v3 Tick Filter bucket. groupId/functionId/parentGroupId are optional so
+// protocol-v2 servers and older recording footers can still be loaded through the legacy ids.
 export type TickFilterBucketPayload = {
+  groupId?: string;
   key: string;
   type: string;
   displayName: string;
+  functionId?: string;
+  parentGroupId?: string;
   firstSeenTick: number;
   lastSeenTick: number;
   startMillis: number;
@@ -379,40 +386,22 @@ export type TickFilterBucketPayload = {
 
 export type Mode = "live" | "recordings" | "replay" | "datapack";
 
-// Adapted from the canonical backend TickFilterBucket payload. The legacy `millis` names contain
-// tick coordinates in this view model so they compose with tick-based timeline buckets.
-export type TickFilterBand = {
-  key: string;
-  displayName: string;
-  startMillis: number; // actually startTick
-  endMillis: number;   // actually endTick + 1
-  totalCount: number;
-  countPerSecond: number;
-  source: string;
-  functionId: string;
-  commandIds: Set<string>;
-  recordIds: Set<number>;
-};
-
 export type FilterState = {
   tick: boolean;
   event: boolean;
   function: boolean;
   command: boolean;
   hideIdleTicks: boolean;
-  // Toggle the dedicated TICK COMMANDS lane (high-frequency command spam shown as red horizontal
-  // bars, audio-track style). On by default; the lane is purely informational.
-  showTickCommands: boolean;
-  // When on, records matched by tick-filter bands are removed from the other lanes (TICK/EVENT/
-  // FUNCTION/COMMANDS) but remain visible in the TICK COMMANDS lane. Off by default so nothing is
-  // hidden unless the user opts in.
-  hideHighFreq: boolean;
+  // Tick noise is always filtered from the ordinary lanes. This flag only controls whether the
+  // dedicated aggregate panel is visible.
+  showFilteredActivity: boolean;
   search: string;
 };
 
 export type Selection =
   | { kind: "record"; id: number }
   | { kind: "functionCall"; functionCallId: string }
+  | { kind: "tickFilterGroup"; groupId: string }
   | null;
 
 export type TimelineBucket = {

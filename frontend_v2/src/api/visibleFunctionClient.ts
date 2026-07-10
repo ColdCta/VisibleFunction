@@ -13,6 +13,8 @@ import type {
 export type StreamMessage =
   // The backend emits `hello` with the health JSON; the client adds `type` as its discriminator.
   | ({ type: "hello" } & HealthResponse)
+  | { type: "tick"; sessionId: number; currentTick: number }
+  | { type: "tickFilter"; tickFilter: TickFilterBucketPayload[] }
   | { type: "record"; record: TraceRecord }
   | { type: "records"; records: TraceRecord[] };
 
@@ -124,6 +126,26 @@ export class VisibleFunctionClient {
       try {
         const record = JSON.parse((ev as MessageEvent).data) as TraceRecord;
         onMessage({ type: "record", record });
+      } catch {
+        /* ignore */
+      }
+    });
+    es.addEventListener("tick", (ev) => {
+      try {
+        const data = JSON.parse((ev as MessageEvent).data) as Record<string, unknown>;
+        onMessage({
+          type: "tick",
+          sessionId: Number(data.sessionId ?? 0),
+          currentTick: Number(data.currentTick ?? 0),
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+    es.addEventListener("tick-filter", (ev) => {
+      try {
+        const data = JSON.parse((ev as MessageEvent).data) as { tickFilter?: TickFilterBucketPayload[] };
+        onMessage({ type: "tickFilter", tickFilter: data.tickFilter ?? [] });
       } catch {
         /* ignore */
       }

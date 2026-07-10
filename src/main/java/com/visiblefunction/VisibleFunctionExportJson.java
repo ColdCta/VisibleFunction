@@ -34,6 +34,10 @@ final class VisibleFunctionExportJson {
 		property(json, "summary", record.payload().summary()).append(',');
 		property(json, "timestampMillis", record.timestampMillis()).append(',');
 		property(json, "sessionId", record.sessionId()).append(',');
+		json.append("\"tickFilterGroupIds\":");
+		stringArray(json, record.tickFilterGroupIds()).append(',');
+		json.append("\"capturedTickFilterGroupIds\":");
+		stringArray(json, record.capturedTickFilterGroupIds()).append(',');
 		json.append("\"commandContext\":");
 		json.append('{');
 		property(json, "command", command).append(',');
@@ -174,7 +178,7 @@ final class VisibleFunctionExportJson {
 	) {
 		StringBuilder json = new StringBuilder(256);
 		json.append('{');
-		property(json, "protocolVersion", 2).append(',');
+		property(json, "protocolVersion", 3).append(',');
 		property(json, "running", running).append(',');
 		property(json, "port", port).append(',');
 		property(json, "records", records).append(',');
@@ -184,6 +188,15 @@ final class VisibleFunctionExportJson {
 		property(json, "latestRecordId", latestRecordId).append(',');
 		property(json, "droppedStreamRecords", droppedStreamRecords).append(',');
 		property(json, "slowClientDisconnects", slowClientDisconnects);
+		json.append('}');
+		return json.toString();
+	}
+
+	static String tick(long sessionId, long currentTick) {
+		StringBuilder json = new StringBuilder(64);
+		json.append('{');
+		property(json, "sessionId", sessionId).append(',');
+		property(json, "currentTick", currentTick);
 		json.append('}');
 		return json.toString();
 	}
@@ -320,9 +333,14 @@ final class VisibleFunctionExportJson {
 
 	private static void tickFilterBucket(StringBuilder json, TickFilterEngine.Snapshot<ExportRecord> bucket) {
 		json.append('{');
+		property(json, "groupId", bucket.groupId()).append(',');
 		property(json, "key", bucket.key()).append(',');
 		property(json, "type", bucket.type().name()).append(',');
 		property(json, "displayName", bucket.displayName()).append(',');
+		property(json, "functionId", bucket.functionId()).append(',');
+		if (bucket.parentGroupId() != null) {
+			property(json, "parentGroupId", bucket.parentGroupId()).append(',');
+		}
 		property(json, "firstSeenTick", bucket.firstSeenTick()).append(',');
 		property(json, "lastSeenTick", bucket.lastSeenTick()).append(',');
 		property(json, "startMillis", bucket.startMillis()).append(',');
@@ -483,6 +501,8 @@ final class VisibleFunctionExportJson {
 		private final VisibleFunctionEventPayload payload;
 		private final long timestampMillis;
 		private final long sessionId;
+		private List<String> tickFilterGroupIds = List.of();
+		private List<String> capturedTickFilterGroupIds = List.of();
 		private volatile String json;
 
 		ExportRecord(long id, VisibleFunctionEventPayload payload, long timestampMillis, long sessionId) {
@@ -506,6 +526,22 @@ final class VisibleFunctionExportJson {
 
 		long sessionId() {
 			return sessionId;
+		}
+
+		List<String> tickFilterGroupIds() {
+			return tickFilterGroupIds;
+		}
+
+		List<String> capturedTickFilterGroupIds() {
+			return capturedTickFilterGroupIds;
+		}
+
+		void setTickFilterMembership(TickFilterEngine.AddResult<ExportRecord> result) {
+			if (json != null) {
+				throw new IllegalStateException("Tick Filter membership must be assigned before record serialization");
+			}
+			tickFilterGroupIds = result.groupIds();
+			capturedTickFilterGroupIds = result.capturedGroupIds();
 		}
 
 		private String json() {

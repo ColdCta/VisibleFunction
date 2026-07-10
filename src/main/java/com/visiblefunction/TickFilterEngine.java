@@ -1,9 +1,13 @@
 package com.visiblefunction;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -19,6 +23,14 @@ final class TickFilterEngine<T> {
 	private static final int DEFAULT_MAX_RECORD_IDS_PER_BUCKET = 8192;
 	private static final int MAX_KEY_LENGTH = 768;
 	private static final int MAX_DISPLAY_NAME_LENGTH = 256;
+	private static final HexFormat HEX = HexFormat.of();
+	private static final ThreadLocal<MessageDigest> GROUP_ID_DIGEST = ThreadLocal.withInitial(() -> {
+		try {
+			return MessageDigest.getInstance("SHA-256");
+		} catch (NoSuchAlgorithmException exception) {
+			throw new IllegalStateException("SHA-256 is unavailable", exception);
+		}
+	});
 
 	private final Map<String, MutableBucket<T>> buckets = new LinkedHashMap<>();
 	private final int maxRecordIdsPerBucket;
@@ -34,18 +46,36 @@ final class TickFilterEngine<T> {
 	}
 
 	boolean add(Input<T> input) {
-		boolean captured = false;
+		return addDetailed(input).captured();
+	}
+
+	AddResult<T> addDetailed(Input<T> input) {
+		List<String> groupIds = new ArrayList<>(3);
+		List<String> capturedGroupIds = new ArrayList<>(3);
+		List<Snapshot<T>> newlyCaptured = new ArrayList<>(3);
 		for (BucketSpec spec : specs(input)) {
-			MutableBucket<T> bucket = buckets.get(spec.key());
+			MutableBucket<T> bucket = buckets.get(spec.groupId());
 			if (bucket == null) {
 				ensureCapacity(input.tick());
 				bucket = new MutableBucket<>(spec, input, maxRecordIdsPerBucket, maxSamplesPerBucket);
-				buckets.put(spec.key(), bucket);
+				buckets.put(spec.groupId(), bucket);
 			}
+			boolean wasCaptured = bucket.captured();
 			bucket.add(input);
-			captured |= bucket.captured();
+			groupIds.add(bucket.groupId);
+			if (bucket.captured()) {
+				capturedGroupIds.add(bucket.groupId);
+				if (!wasCaptured) {
+					newlyCaptured.add(bucket.snapshot(input.tick()));
+				}
+			}
 		}
-		return captured;
+		return new AddResult<>(
+			!capturedGroupIds.isEmpty(),
+			List.copyOf(groupIds),
+			List.copyOf(capturedGroupIds),
+			List.copyOf(newlyCaptured)
+		);
 	}
 
 	void removeRecord(long recordId) {
@@ -56,7 +86,7 @@ final class TickFilterEngine<T> {
 
 	boolean isCaptured(Input<T> input) {
 		for (BucketSpec spec : specs(input)) {
-			MutableBucket<T> bucket = buckets.get(spec.key());
+			MutableBucket<T> bucket = buckets.get(spec.groupId());
 			if (bucket != null && bucket.captured()) {
 				return true;
 			}
@@ -66,7 +96,7 @@ final class TickFilterEngine<T> {
 
 	Snapshot<T> bucketFor(Input<T> input, long currentTick) {
 		for (BucketSpec spec : specs(input)) {
-			MutableBucket<T> bucket = buckets.get(spec.key());
+			MutableBucket<T> bucket = buckets.get(spec.groupId());
 			if (bucket != null && bucket.captured()) {
 				return bucket.snapshot(currentTick);
 			}
@@ -147,28 +177,46 @@ final class TickFilterEngine<T> {
 		if ("COMMAND".equals(input.category())) {
 			String command = normalize(input.command().isBlank() ? input.displayName() : input.command());
 			if (!command.isBlank()) {
-				specs.add(new BucketSpec(
-					boundedKey("COMMAND:" + command + "|" + input.source() + "|" + input.functionId()),
+				specs.add(bucketSpec(
+					"COMMAND:" + command + "|" + input.source() + "|" + input.functionId(),
 					BucketType.COMMAND,
-					boundedDisplayName(command)
+					boundedDisplayName(command),
+					input.functionId()
 				));
 			}
 		}
 		if ("EVENT".equals(input.category())) {
-			specs.add(new BucketSpec(
-				boundedKey("EVENT:" + input.eventAction() + "|" + input.displayName() + "|" + input.command()),
+			specs.add(bucketSpec(
+				"EVENT:" + input.eventAction() + "|" + input.displayName() + "|" + input.command(),
 				BucketType.EVENT,
-				boundedDisplayName(input.displayName())
+				boundedDisplayName(input.displayName()),
+				input.functionId()
 			));
 		}
 		if (hasFunction(input.functionId())) {
-			specs.add(new BucketSpec(
-				boundedKey("FUNCTION:" + input.functionId()),
+			specs.add(bucketSpec(
+				"FUNCTION:" + input.functionId(),
 				BucketType.FUNCTION,
-				boundedDisplayName(input.functionId())
+				boundedDisplayName(input.functionId()),
+				input.functionId()
 			));
 		}
 		return specs;
+	}
+
+	private static BucketSpec bucketSpec(String canonicalKey, BucketType type, String displayName, String functionId) {
+		String groupId = stableGroupId(canonicalKey);
+		String parentGroupId = type != BucketType.FUNCTION && hasFunction(functionId)
+			? stableGroupId("FUNCTION:" + functionId)
+			: null;
+		return new BucketSpec(
+			groupId,
+			boundedKey(canonicalKey, groupId),
+			type,
+			displayName,
+			hasFunction(functionId) ? functionId : "none",
+			parentGroupId
+		);
 	}
 
 	private static boolean hasFunction(String functionId) {
@@ -179,11 +227,18 @@ final class TickFilterEngine<T> {
 		return command == null ? "" : command.trim().replaceAll("\\s+", " ");
 	}
 
-	private static String boundedKey(String key) {
+	private static String boundedKey(String key, String groupId) {
 		if (key.length() <= MAX_KEY_LENGTH) {
 			return key;
 		}
-		return key.substring(0, MAX_KEY_LENGTH - 17) + "#" + Integer.toUnsignedString(key.hashCode(), 16);
+		return key.substring(0, MAX_KEY_LENGTH - 17) + "#" + groupId.substring(0, 16);
+	}
+
+	private static String stableGroupId(String canonicalKey) {
+		MessageDigest digest = GROUP_ID_DIGEST.get();
+		digest.reset();
+		byte[] hash = digest.digest(canonicalKey.getBytes(StandardCharsets.UTF_8));
+		return HEX.formatHex(hash, 0, 16);
 	}
 
 	private static String boundedDisplayName(String displayName) {
@@ -231,9 +286,12 @@ final class TickFilterEngine<T> {
 	}
 
 	record Snapshot<T>(
+		String groupId,
 		String key,
 		BucketType type,
 		String displayName,
+		String functionId,
+		String parentGroupId,
 		long firstSeenTick,
 		long lastSeenTick,
 		long startMillis,
@@ -249,13 +307,31 @@ final class TickFilterEngine<T> {
 	) {
 	}
 
-	private record BucketSpec(String key, BucketType type, String displayName) {
+	record AddResult<T>(
+		boolean captured,
+		List<String> groupIds,
+		List<String> capturedGroupIds,
+		List<Snapshot<T>> newlyCaptured
+	) {
+	}
+
+	private record BucketSpec(
+		String groupId,
+		String key,
+		BucketType type,
+		String displayName,
+		String functionId,
+		String parentGroupId
+	) {
 	}
 
 	private static final class MutableBucket<T> {
+		private final String groupId;
 		private final String key;
 		private final BucketType type;
 		private final String displayName;
+		private final String functionId;
+		private final String parentGroupId;
 		private final long firstSeenTick;
 		private final Deque<TickCount> recentCounts = new ArrayDeque<>();
 		private final Deque<Sample<T>> sampleRecords = new ArrayDeque<>();
@@ -273,9 +349,12 @@ final class TickFilterEngine<T> {
 		private boolean tickFunction;
 
 		private MutableBucket(BucketSpec spec, Input<T> input, int maxRecordIds, int maxSamples) {
+			groupId = spec.groupId();
 			key = spec.key();
 			type = spec.type();
 			displayName = spec.displayName();
+			functionId = spec.functionId();
+			parentGroupId = spec.parentGroupId();
 			firstSeenTick = input.tick();
 			lastSeenTick = input.tick();
 			startMillis = input.timestampMillis();
@@ -354,9 +433,12 @@ final class TickFilterEngine<T> {
 			pruneRecent(currentTick);
 			List<T> samples = sampleRecords.stream().map(Sample::value).toList();
 			return new Snapshot<>(
+				groupId,
 				key,
 				type,
 				displayName,
+				functionId,
+				parentGroupId,
 				firstSeenTick,
 				lastSeenTick,
 				startMillis,

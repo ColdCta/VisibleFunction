@@ -50,7 +50,7 @@ final class VisibleFunctionExportServer {
 	private final List<ExportRecord> records = new ArrayList<>();
 	private final TickFilterEngine<ExportRecord> tickFilterEngine = new TickFilterEngine<>();
 	private final List<SseClient> clients = new CopyOnWriteArrayList<>();
-	private final BlockingDeque<ExportRecord> pendingRecords = new LinkedBlockingDeque<>(MAX_PENDING_STREAM_RECORDS);
+	private final BlockingDeque<PendingRecord> pendingRecords = new LinkedBlockingDeque<>(MAX_PENDING_STREAM_RECORDS);
 	private final AtomicLong nextRecordId = new AtomicLong(1);
 	private final AtomicLong nextSessionId = new AtomicLong(System.currentTimeMillis());
 	private final AtomicLong droppedStreamRecords = new AtomicLong();
@@ -60,6 +60,7 @@ final class VisibleFunctionExportServer {
 	private volatile int port;
 	private volatile long sessionId;
 	private volatile long currentTick;
+	private volatile long lastTickBroadcast = Long.MIN_VALUE;
 	private Thread acceptThread;
 	private Thread broadcastThread;
 
@@ -85,6 +86,7 @@ final class VisibleFunctionExportServer {
 		slowClientDisconnects.set(0);
 		sessionId = nextSessionId.getAndIncrement();
 		currentTick = 0;
+		lastTickBroadcast = Long.MIN_VALUE;
 
 		try {
 			ServerSocket socket = new ServerSocket();
@@ -166,10 +168,11 @@ final class VisibleFunctionExportServer {
 			records.add(record);
 			TickFilterEngine.Input<ExportRecord> input = VisibleFunctionExportJson.tickFilterInput(record);
 			currentTick = Math.max(currentTick, input.tick());
-			tickFilterEngine.add(input);
+			TickFilterEngine.AddResult<ExportRecord> filterResult = tickFilterEngine.addDetailed(input);
+			record.setTickFilterMembership(filterResult);
 			pruneRetainedRecords();
+			offerPendingRecord(record, filterResult.newlyCaptured());
 		}
-		offerPendingRecord(record);
 	}
 
 	private void pruneRetainedRecords() {
@@ -186,10 +189,23 @@ final class VisibleFunctionExportServer {
 
 	void tick(long gameTick) {
 		currentTick = gameTick;
+		if (!running) {
+			return;
+		}
+		long previous = lastTickBroadcast;
+		if (previous != Long.MIN_VALUE && gameTick >= previous && gameTick - previous < 5) {
+			return;
+		}
+		lastTickBroadcast = gameTick;
+		broadcastEvent("tick", VisibleFunctionExportJson.tick(sessionId, gameTick));
 	}
 
-	private void offerPendingRecord(ExportRecord record) {
-		while (!pendingRecords.offerLast(record)) {
+	private void offerPendingRecord(
+		ExportRecord record,
+		List<TickFilterEngine.Snapshot<ExportRecord>> newlyCaptured
+	) {
+		PendingRecord pending = new PendingRecord(record, newlyCaptured);
+		while (!pendingRecords.offerLast(pending)) {
 			if (pendingRecords.pollFirst() != null) {
 				droppedStreamRecords.incrementAndGet();
 			}
@@ -214,29 +230,44 @@ final class VisibleFunctionExportServer {
 	private void broadcastLoop() {
 		while (running) {
 			try {
-				ExportRecord record = pendingRecords.takeFirst();
-				List<ExportRecord> batch = new ArrayList<>();
-				batch.add(record);
+				PendingRecord pending = pendingRecords.takeFirst();
+				List<PendingRecord> batch = new ArrayList<>();
+				batch.add(pending);
 				pendingRecords.drainTo(batch, MAX_STREAM_BATCH - 1);
 
 				if (clients.isEmpty()) {
 					continue;
 				}
 
-				String eventName = batch.size() == 1 ? "record" : "records";
-				String eventJson = batch.size() == 1 ? VisibleFunctionExportJson.record(batch.getFirst()) : VisibleFunctionExportJson.records(batch);
-				for (SseClient client : clients) {
-					// Non-blocking enqueue: a slow client can never stall this loop. If its buffer is
-					// full it has fallen too far behind, so drop it.
-					if (!client.offer(eventName, eventJson)) {
-						clients.remove(client);
-						slowClientDisconnects.incrementAndGet();
-						client.close();
-					}
+				List<TickFilterEngine.Snapshot<ExportRecord>> transitions = new ArrayList<>();
+				List<ExportRecord> records = new ArrayList<>(batch.size());
+				for (PendingRecord item : batch) {
+					records.add(item.record());
+					transitions.addAll(item.newlyCaptured());
 				}
+				if (!transitions.isEmpty()) {
+					broadcastEvent("tick-filter", VisibleFunctionExportJson.tickFilterSnapshots(transitions));
+				}
+
+				String eventName = records.size() == 1 ? "record" : "records";
+				String eventJson = records.size() == 1
+					? VisibleFunctionExportJson.record(records.getFirst())
+					: VisibleFunctionExportJson.records(records);
+				broadcastEvent(eventName, eventJson);
 			} catch (InterruptedException ignored) {
 				Thread.currentThread().interrupt();
 				return;
+			}
+		}
+	}
+
+	private void broadcastEvent(String eventName, String eventJson) {
+		for (SseClient client : clients) {
+			// Non-blocking enqueue: a slow client can never stall the producer thread. If its buffer is
+			// full it has fallen too far behind, so drop it.
+			if (!client.offer(eventName, eventJson) && clients.remove(client)) {
+				slowClientDisconnects.incrementAndGet();
+				client.close();
 			}
 		}
 	}
@@ -596,6 +627,15 @@ final class VisibleFunctionExportServer {
 		try {
 			socket.close();
 		} catch (IOException ignored) {
+		}
+	}
+
+	private record PendingRecord(
+		ExportRecord record,
+		List<TickFilterEngine.Snapshot<ExportRecord>> newlyCaptured
+	) {
+		private PendingRecord {
+			newlyCaptured = List.copyOf(newlyCaptured);
 		}
 	}
 

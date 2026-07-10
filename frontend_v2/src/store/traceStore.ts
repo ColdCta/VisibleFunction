@@ -16,6 +16,10 @@ import { recordTick } from "./traceTime";
 import type { RelationshipGraphRequest } from "./relationshipGraph";
 import { BoundedBuffer } from "./boundedBuffer";
 import {
+  capturedGroupIdsFromBuckets,
+  mergeTickFilterBuckets,
+} from "./tickFilter";
+import {
   addTraceGap,
   markTraceGapsUnavailableBefore,
   nextRecoveringTraceGap,
@@ -54,6 +58,8 @@ export type SettingsState = {
   liveBufferTicks: number;
 };
 
+export type BucketMode = "auto" | number;
+
 type TraceNodeState = {
   records: TraceRecord[];
   indexes: TraceIndexes;
@@ -91,6 +97,8 @@ type Store = {
   connection: ConnectionState;
   mockMode: boolean;
   streamError: boolean;
+  capturedTickFilterGroupIds: Set<string>;
+  revealedTickFilterGroupIds: Set<string>;
   traceGaps: TraceGap[];
   clientDroppedRecords: number;
   backendOldestRecordId: number;
@@ -111,6 +119,7 @@ type Store = {
   range: { min: number; max: number };
   viewRange: { min: number; max: number };
   bucketTicks: number;
+  bucketMode: BucketMode;
   autoScroll: boolean;
   recordingStatus: RecordingStatus | null;
   tickFilterBuckets: TickFilterBucketPayload[];
@@ -136,8 +145,10 @@ type Store = {
   clear: () => void;
   setAutoScroll: (v: boolean) => void;
   setBucket: (ticks: number) => void;
+  setBucketMode: (mode: BucketMode) => void;
   setFilters: (patch: Partial<FilterState>) => void;
   setSelection: (s: Selection) => void;
+  setTickFilterGroupReveal: (groupIds: string[], reveal: boolean) => void;
   openRelationshipGraphForEvents: (anchorEventId: number, eventIds: number[], label: string) => void;
   closeRelationshipGraph: () => void;
   setRange: (min: number, max: number) => void;
@@ -183,6 +194,8 @@ export const useTraceStore = create<Store>((set, get) => ({
   connection: "disconnected",
   mockMode: false,
   streamError: false,
+  capturedTickFilterGroupIds: new Set(),
+  revealedTickFilterGroupIds: new Set(),
   traceGaps: [],
   clientDroppedRecords: 0,
   backendOldestRecordId: 0,
@@ -204,13 +217,13 @@ export const useTraceStore = create<Store>((set, get) => ({
     function: true,
     command: true,
     hideIdleTicks: false,
-    showTickCommands: true,
-    hideHighFreq: false,
+    showFilteredActivity: true,
     search: "",
   },
   range: { min: 0, max: 0 },
   viewRange: { min: 0, max: 0 },
   bucketTicks: 1,
+  bucketMode: "auto",
   autoScroll: true,
   recordingStatus: null,
   tickFilterBuckets: [],
@@ -281,13 +294,17 @@ export const useTraceStore = create<Store>((set, get) => ({
       const back = await client.records({ limit: Math.min(RESUME_BACKFILL_LIMIT, Math.max(1, backfillLimit)), tail: true });
       const incoming = (back.records ?? []).slice().sort((a, b) => a.id - b.id);
       for (const record of incoming) observeRecordIntegrity(record.id);
+      const capturedTickFilterGroupIds = mergeCapturedGroupIds(
+        get().capturedTickFilterGroupIds,
+        capturedGroupIdsFromRecords(incoming)
+      );
       const list = pruneLiveRecords(incoming);
       const range = computeRange(list);
       const node = traceNode(list, range, lastWindow(range));
       if (get().mode === "live") {
-        set({ liveNode: node, ...node, pendingRecords: [], ...traceIntegrityPatch() });
+        set({ liveNode: node, ...node, pendingRecords: [], capturedTickFilterGroupIds, ...traceIntegrityPatch() });
       } else {
-        set({ liveNode: node, pendingRecords: [], ...traceIntegrityPatch() });
+        set({ liveNode: node, pendingRecords: [], capturedTickFilterGroupIds, ...traceIntegrityPatch() });
       }
     } catch {
       /* keep last good data visible (docs :784) */
@@ -304,6 +321,16 @@ export const useTraceStore = create<Store>((set, get) => ({
         } else if (msg.type === "hello") {
           resetLiveSessionIfNeeded(msg.sessionId);
           set({ liveCurrentTick: msg.currentTick ?? 0, ...healthIntegrityPatch(msg) });
+        } else if (msg.type === "tick") {
+          resetLiveSessionIfNeeded(msg.sessionId);
+          set({ liveCurrentTick: msg.currentTick });
+        } else if (msg.type === "tickFilter") {
+          const tickFilterBuckets = mergeTickFilterBuckets(get().tickFilterBuckets, msg.tickFilter);
+          const capturedTickFilterGroupIds = mergeCapturedGroupIds(
+            get().capturedTickFilterGroupIds,
+            capturedGroupIdsFromBuckets(msg.tickFilter)
+          );
+          set({ tickFilterBuckets, capturedTickFilterGroupIds });
         }
       },
       () => {
@@ -371,6 +398,8 @@ export const useTraceStore = create<Store>((set, get) => ({
       ...empty,
       pendingRecords: [],
       tickFilterBuckets: [],
+      capturedTickFilterGroupIds: new Set(),
+      revealedTickFilterGroupIds: new Set(),
       relationshipGraphRequest: null,
     });
     pendingIds.clear();
@@ -385,7 +414,16 @@ export const useTraceStore = create<Store>((set, get) => ({
   },
 
   setBucket(ticks) {
-    set({ bucketTicks: ticks });
+    set({ bucketTicks: ticks, bucketMode: ticks });
+  },
+
+  setBucketMode(mode) {
+    if (mode === "auto") {
+      set({ bucketMode: "auto" });
+      return;
+    }
+    const ticks = Math.max(1, Math.floor(mode));
+    set({ bucketMode: ticks, bucketTicks: ticks });
   },
 
   setFilters(patch) {
@@ -416,7 +454,19 @@ export const useTraceStore = create<Store>((set, get) => ({
       peers.forEach((p: TraceRecord) => highlight.add(p.id));
     }
     const nodeKey = activeNodeKey(get().mode);
-    set({ selection: s, highlightIds: highlight, [nodeKey]: { ...get()[nodeKey], selection: s, highlightIds: highlight } });
+    const currentSelection = get().selection;
+    const keepReveal = s?.kind === "tickFilterGroup" && currentSelection?.kind === "tickFilterGroup"
+      && s.groupId === currentSelection.groupId;
+    set({
+      selection: s,
+      highlightIds: highlight,
+      revealedTickFilterGroupIds: keepReveal ? get().revealedTickFilterGroupIds : new Set(),
+      [nodeKey]: { ...get()[nodeKey], selection: s, highlightIds: highlight },
+    });
+  },
+
+  setTickFilterGroupReveal(groupIds, reveal) {
+    set({ revealedTickFilterGroupIds: reveal ? new Set(groupIds) : new Set() });
   },
 
   openRelationshipGraphForEvents(anchorEventId, eventIds, label) {
@@ -444,6 +494,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       mode: "live" as const,
       activeRecording: null,
       recordingLoadError: null,
+      revealedTickFilterGroupIds: new Set<string>(),
       relationshipGraphRequest: null,
       liveWarmupState: shouldWarm ? "warming" as const : "ready" as const,
       ...state.liveNode,
@@ -470,6 +521,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       paused: false,
       activeRecording: null,
       recordingLoadError: null,
+      revealedTickFilterGroupIds: new Set(),
       ...empty,
       pendingRecords: [],
       relationshipGraphRequest: null,
@@ -496,6 +548,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     const current = get();
     const patch: Partial<Store> = {
       mode: "datapack",
+      revealedTickFilterGroupIds: new Set(),
       relationshipGraphRequest: null,
       liveWarmupState: "idle",
     };
@@ -538,6 +591,11 @@ export const useTraceStore = create<Store>((set, get) => ({
         ...payload.data.other,
       ]
     ).sort((a, b) => a.id - b.id);
+    const tickFilterBuckets = payload.data.tickFilter ?? [];
+    const capturedTickFilterGroupIds = mergeCapturedGroupIds(
+      capturedGroupIdsFromBuckets(tickFilterBuckets),
+      capturedGroupIdsFromRecords(list)
+    );
     const range = computeRange(list);
     const node = traceNode(list, range, replayInitialWindow(list, range));
     set({
@@ -548,7 +606,9 @@ export const useTraceStore = create<Store>((set, get) => ({
       autoScroll: false,
       paused: false,
       pendingRecords: [],
-      tickFilterBuckets: payload.data.tickFilter ?? [],
+      tickFilterBuckets,
+      capturedTickFilterGroupIds,
+      revealedTickFilterGroupIds: new Set(),
       relationshipGraphRequest: null,
       recordingLoadError: null,
     });
@@ -580,10 +640,17 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   async pollTickFilter() {
     const state = get();
-    if (state.mockMode || state.mode !== "live" || state.paused) return;
+    if (state.mode !== "live" || state.paused) return;
     try {
       const response = await state.client.tickFilter();
-      set({ tickFilterBuckets: response.tickFilter ?? [] });
+      const tickFilterBuckets = response.tickFilter ?? [];
+      set({
+        tickFilterBuckets,
+        capturedTickFilterGroupIds: mergeCapturedGroupIds(
+          state.capturedTickFilterGroupIds,
+          capturedGroupIdsFromBuckets(tickFilterBuckets)
+        ),
+      });
     } catch {
       /* keep the last canonical backend snapshot */
     }
@@ -605,16 +672,23 @@ export const useTraceStore = create<Store>((set, get) => ({
   },
 
   setMode(m) {
-    set({ mode: m });
+    set({ mode: m, revealedTickFilterGroupIds: new Set() });
   },
 
   ingestRecord(r) {
     const cur = get();
     if (cur.paused) return;
+    const capturedTickFilterGroupIds = mergeCapturedGroupIds(
+      cur.capturedTickFilterGroupIds,
+      new Set(r.capturedTickFilterGroupIds ?? [])
+    );
+    const capturedChanged = capturedTickFilterGroupIds.size !== cur.capturedTickFilterGroupIds.size;
     const integrityChanged = observeRecordIntegrity(r.id);
     const liveIndexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
     if (liveIndexes.recordsById.has(r.id) || pendingIds.has(r.id)) {
-      if (integrityChanged) set(traceIntegrityPatch());
+      if (integrityChanged || capturedChanged) {
+        set({ ...traceIntegrityPatch(), capturedTickFilterGroupIds });
+      }
       return;
     }
     pendingIds.add(r.id);
@@ -624,7 +698,9 @@ export const useTraceStore = create<Store>((set, get) => ({
       liveTraceGaps = addTraceGap(liveTraceGaps, dropped.id, dropped.id);
       clientDroppedRecords++;
     }
-    if (integrityChanged || dropped) set(traceIntegrityPatch());
+    if (integrityChanged || dropped || capturedChanged) {
+      set({ ...traceIntegrityPatch(), capturedTickFilterGroupIds });
+    }
     scheduleFlush();
   },
 }));
@@ -943,6 +1019,7 @@ function buildTickSummary(records: TraceRecord[], tickMin: number, tickMax: numb
 
 function sanitizeSelection(selection: Selection, indexes: TraceIndexes): Selection {
   if (!selection) return null;
+  if (selection.kind === "tickFilterGroup") return selection;
   if (selection.kind === "record") {
     return indexes.recordsById.has(selection.id) ? selection : null;
   }
@@ -1018,6 +1095,8 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     liveNode: empty,
     pendingRecords: [],
     tickFilterBuckets: [],
+    capturedTickFilterGroupIds: new Set(),
+    revealedTickFilterGroupIds: new Set(),
     liveCurrentTick: 0,
     relationshipGraphRequest: null,
     traceGaps: [],
@@ -1053,6 +1132,21 @@ function healthIntegrityPatch(health: HealthResponse): Partial<Store> {
     backendDroppedStreamRecords: health.droppedStreamRecords ?? 0,
     backendSlowClientDisconnects: health.slowClientDisconnects ?? 0,
   };
+}
+
+function capturedGroupIdsFromRecords(records: TraceRecord[]): Set<string> {
+  const captured = new Set<string>();
+  for (const record of records) {
+    for (const groupId of record.capturedTickFilterGroupIds ?? []) captured.add(groupId);
+  }
+  return captured;
+}
+
+function mergeCapturedGroupIds(current: Set<string>, incoming: Set<string>): Set<string> {
+  if (incoming.size === 0) return current;
+  const merged = new Set(current);
+  for (const groupId of incoming) merged.add(groupId);
+  return merged;
 }
 
 function formatBytes(value: number): string {

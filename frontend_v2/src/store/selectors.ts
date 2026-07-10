@@ -1,13 +1,12 @@
-import type { FilterState, TickFilterBand, TickFilterBucketPayload, TimelineBucket, TraceIndexes, TraceRecord } from "../api/types";
+import type { FilterState, Selection, TickFilterBucketPayload, TimelineBucket, TraceIndexes, TraceRecord } from "../api/types";
 import { effectiveAction } from "./recordNorm";
-import { buildBuckets, buildRangeBuckets } from "./timelineBuckets";
-import { isTickFilteredRecord, tickFilterBandsFromPayload } from "./tickFilter";
+import { buildBuckets, buildBucketsForRange } from "./timelineBuckets";
+import { isTickFilteredRecord } from "./tickFilter";
 import { recordTick } from "./traceTime";
 
 export type ViewModel = {
   filtered: TraceRecord[];
   buckets: TimelineBucket[];
-  tickFilterBands: TickFilterBand[];
   totalCommands: number;
   totalEvents: number;
   totalFunctions: number;
@@ -20,7 +19,9 @@ export function selectViewModel(
   filters: FilterState,
   bucketTicks: number,
   viewRange?: { min: number; max: number },
-  tickFilterBuckets: TickFilterBucketPayload[] = []
+  tickFilterBuckets: TickFilterBucketPayload[] = [],
+  capturedTickFilterGroupIds: Set<string> = new Set(),
+  revealedTickFilterGroupIds: Set<string> = new Set()
 ): ViewModel {
   void indexes; // indexes are used by selection/highlight, not by bucketing; kept for API symmetry.
 
@@ -29,33 +30,24 @@ export function selectViewModel(
   const scopedRecords = searchActive ? records : recordsForView(records, viewRange, bucketTicks);
   const candidates = filterRecords(scopedRecords, filters);
 
-  // Bands are always derived so the TICK COMMANDS lane can render. When hideHighFreq is on, matched
-  // records are removed from the other lanes (TICK/EVENT/FUNCTION/COMMANDS) but the bands stay
-  // visible in the TICK COMMANDS lane — the user sees what was filtered, not just an empty axis.
-  const tickFilterBands = tickFilterBandsFromPayload(tickFilterBuckets);
-  const filtered = filters.hideHighFreq && tickFilterBands.length > 0
-    ? candidates.filter((r) => !isTickFilteredRecord(r, tickFilterBands))
-    : candidates;
+  // Captured records remain in client state and statistics, but are omitted from ordinary lanes.
+  // The aggregate panel reads the canonical buckets separately from this view model.
+  const filtered = candidates.filter((record) => !isTickFilteredRecord(
+    record,
+    tickFilterBuckets,
+    capturedTickFilterGroupIds,
+    revealedTickFilterGroupIds
+  ));
 
-  let buckets = buildBuckets(filtered, bucketTicks);
-  if (buckets.length === 0 && filtered.length > 0) {
-    const minT = Math.min(...filtered.map((r) => Number(r.basicFields.tick ?? 0)));
-    const maxT = Math.max(...filtered.map((r) => Number(r.basicFields.tick ?? 0)));
-    buckets = buildRangeBuckets(minT, maxT, bucketTicks);
-  }
-
-  // Always extend the bucket grid to the latest tick from candidates (pre-hideHighFreq) so the
-  // TICK lane keeps rendering the live edge even when every record in the newest tick was spam-
-  // filtered out of `filtered`. Without this, the newest bucket vanishes and the TICK timeline
-  // stops updating (#1).
-  if (candidates.length > 0) {
-    const latestTick = Math.max(...candidates.map((r) => recordTick(r)));
-    const lastEnd = buckets.length > 0 ? buckets[buckets.length - 1].endTick : Math.floor(latestTick / bucketTicks) * bucketTicks;
-    if (lastEnd <= latestTick) {
-      const ext = buildRangeBuckets(lastEnd, latestTick, bucketTicks);
-      if (ext.length > 0) buckets = buckets.concat(ext);
-    }
-  }
+  // The time grid is authoritative and continuous. Filtering can populate cells, but can never
+  // collapse or recreate the tick columns themselves.
+  const hasViewRange = viewRange != null
+    && Number.isFinite(viewRange.min)
+    && Number.isFinite(viewRange.max)
+    && viewRange.max >= viewRange.min;
+  const buckets = hasViewRange
+    ? buildBucketsForRange(filtered, viewRange.min, viewRange.max, bucketTicks)
+    : buildBuckets(filtered, bucketTicks);
 
   let totalCommands = 0;
   let totalEvents = 0;
@@ -70,7 +62,6 @@ export function selectViewModel(
   return {
     filtered,
     buckets,
-    tickFilterBands,
     totalCommands,
     totalEvents,
     totalFunctions: functionCalls.size,
@@ -165,10 +156,7 @@ function matchesSearch(r: TraceRecord, q: string): boolean {
 }
 
 export function selectSelectedRecord(
-  selection:
-    | { kind: "record"; id: number }
-    | { kind: "functionCall"; functionCallId: string }
-    | null,
+  selection: Selection,
   indexes: TraceIndexes
 ): { record: TraceRecord | null; related: TraceRecord[] } {
   if (!selection) return { record: null, related: [] };
@@ -176,6 +164,7 @@ export function selectSelectedRecord(
     const r = indexes.recordsById.get(selection.id) ?? null;
     return { record: r, related: [] };
   }
+  if (selection.kind === "tickFilterGroup") return { record: null, related: [] };
   const peers = indexes.recordsByFunctionCallId.get(selection.functionCallId) ?? [];
   return { record: peers[0] ?? null, related: peers };
 }

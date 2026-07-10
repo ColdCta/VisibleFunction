@@ -49,6 +49,30 @@ class VisibleFunctionRecordingManagerTest {
 	}
 
 	@Test
+	void recordingClassifiesRecordsBeforeSerializationAndUsesTheSameFooterGroupIds() {
+		VisibleFunctionRecordingManager manager = new VisibleFunctionRecordingManager(
+			directory,
+			Clock.systemUTC(),
+			() -> "membership"
+		);
+		assertTrue(manager.start().success());
+		manager.publish(tickFunctionPayload(10));
+		assertTrue(manager.stop().success());
+
+		var recording = JsonParser.parseString(manager.latestRecordingJson()).getAsJsonObject();
+		var record = recording.getAsJsonArray("records").get(0).getAsJsonObject();
+		var groupIds = record.getAsJsonArray("tickFilterGroupIds");
+		assertEquals(2, groupIds.size());
+		assertEquals(2, record.getAsJsonArray("capturedTickFilterGroupIds").size());
+		var footerBuckets = recording.getAsJsonObject("data").getAsJsonArray("tickFilter");
+		assertEquals(2, footerBuckets.size());
+		for (var bucketElement : footerBuckets) {
+			String groupId = bucketElement.getAsJsonObject().get("groupId").getAsString();
+			assertTrue(groupIds.asList().stream().anyMatch(value -> groupId.equals(value.getAsString())));
+		}
+	}
+
+	@Test
 	void interruptedJournalRecoversCompleteLinesOnly() throws Exception {
 		String id = "20260705-120000-000-deadbeef";
 		Path journal = directory.resolve("visiblefunction-recording-" + id + ".journal.tmp");
@@ -337,6 +361,17 @@ class VisibleFunctionRecordingManagerTest {
 			"say hi",
 			"executed",
 			"- tick: " + tick + "\n- command_id: " + tick + "\n- source: player\n- function: none\n",
+			"- tick: " + tick + "\n"
+		);
+	}
+
+	private static VisibleFunctionEventPayload tickFunctionPayload(int tick) {
+		return new VisibleFunctionEventPayload(
+			"COMMAND",
+			"say hi",
+			"executed",
+			"- tick: " + tick + "\n- command: say hi\n- command_id: command-" + tick
+				+ "\n- source: tick function\n- function: demo:tick\n",
 			"- tick: " + tick + "\n"
 		);
 	}

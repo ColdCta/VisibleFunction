@@ -19,6 +19,18 @@ export const BUCKET_SIZES: BucketSize[] = [
   { label: "5s", ticks: 100 },
 ];
 
+export function autoBucketTicks(viewSpanTicks: number, targetBuckets = 10): number {
+  const span = Math.max(1, Math.ceil(viewSpanTicks));
+  const target = Math.max(1, Math.floor(targetBuckets));
+  const raw = Math.max(1, Math.ceil(span / target));
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  for (const multiplier of [1, 2, 5, 10]) {
+    const candidate = multiplier * magnitude;
+    if (candidate >= raw) return candidate;
+  }
+  return raw;
+}
+
 export function buildBuckets(records: TraceRecord[], bucketTicks: number): TimelineBucket[] {
   if (records.length === 0) return [];
   return buildExplicitTickBuckets(records, bucketTicks);
@@ -49,6 +61,23 @@ export function buildRangeBuckets(startTick: number, endTick: number, bucketTick
   return buckets;
 }
 
+export function buildBucketsForRange(
+  records: TraceRecord[],
+  startTick: number,
+  endTick: number,
+  bucketTicks: number
+): TimelineBucket[] {
+  const buckets = buildRangeBuckets(startTick, endTick, bucketTicks);
+  const byKey = new Map(buckets.map((bucket) => [bucket.key, bucket]));
+  for (const record of records) {
+    const tick = recordTick(record);
+    if (tick < startTick || tick > endTick) continue;
+    const bucket = byKey.get(recordTickKey(record, bucketTicks));
+    if (bucket) addRecordToBucket(bucket, record);
+  }
+  return buckets;
+}
+
 function buildExplicitTickBuckets(records: TraceRecord[], bucketTicks: number): TimelineBucket[] {
   const map = new Map<string, TimelineBucket>();
 
@@ -72,28 +101,33 @@ function buildExplicitTickBuckets(records: TraceRecord[], bucketTicks: number): 
       map.set(key, bucket);
     }
 
-    bucket.startTick = Math.min(bucket.startTick, tick);
-    bucket.endTick = Math.max(bucket.endTick, tick + 1);
-    bucket.records.push(r);
-    if (isCommand(r)) bucket.commands.push(r);
-    else if (isEvent(r)) bucket.events.push(r);
-    else bucket.functions.push(r);
-
-    const fcid = r.commandContext.functionCallId;
-    if (fcid && fcid !== "none") {
-      const arr = bucket.byFunctionCallId.get(fcid) ?? [];
-      arr.push(r);
-      bucket.byFunctionCallId.set(fcid, arr);
-    }
-    const cid = r.commandContext.commandId;
-    if (cid && cid !== "none") {
-      const arr = bucket.byCommandId.get(cid) ?? [];
-      arr.push(r);
-      bucket.byCommandId.set(cid, arr);
-    }
+    addRecordToBucket(bucket, r);
   }
 
   return Array.from(map.values()).sort((a, b) => a.startTick - b.startTick);
+}
+
+function addRecordToBucket(bucket: TimelineBucket, record: TraceRecord) {
+  const tick = recordTick(record);
+  bucket.startTick = Math.min(bucket.startTick, tick);
+  bucket.endTick = Math.max(bucket.endTick, tick + 1);
+  bucket.records.push(record);
+  if (isCommand(record)) bucket.commands.push(record);
+  else if (isEvent(record)) bucket.events.push(record);
+  else bucket.functions.push(record);
+
+  const functionCallId = record.commandContext.functionCallId;
+  if (functionCallId && functionCallId !== "none") {
+    const records = bucket.byFunctionCallId.get(functionCallId) ?? [];
+    records.push(record);
+    bucket.byFunctionCallId.set(functionCallId, records);
+  }
+  const commandId = record.commandContext.commandId;
+  if (commandId && commandId !== "none") {
+    const records = bucket.byCommandId.get(commandId) ?? [];
+    records.push(record);
+    bucket.byCommandId.set(commandId, records);
+  }
 }
 
 export function formatBucketHeader(bucket: TimelineBucket, bucketTicks: number): string {

@@ -42,6 +42,7 @@ final class VisibleFunctionRecordingManager {
 	private static final long FOOTER_RESERVE_BYTES = 16L * 1024 * 1024;
 	private static final int RECORDING_TICK_FILTER_IDS_PER_BUCKET = 8;
 	private static final int RECORDING_TICK_FILTER_SAMPLES_PER_BUCKET = 0;
+	private static final int TICK_FILTER_MEMBERSHIP_OVERHEAD_BYTES = 512;
 	private static final RecordingLimits DEFAULT_LIMITS = defaultLimits();
 	private static final VisibleFunctionRecordingManager INSTANCE = new VisibleFunctionRecordingManager(
 		Path.of("visiblefunction-recordings"),
@@ -306,14 +307,19 @@ final class VisibleFunctionRecordingManager {
 			now,
 			VisibleFunctionExportServer.instance().sessionId()
 		);
-		byte[] encoded = session.encodeRecord(record);
 		try {
-			String limitReason = limitReason(session, encoded.length, now);
+			// Run limit checks before mutating the recording's Tick Filter engine. A conservative
+			// allowance covers the protocol-v3 membership arrays that are attached after classification.
+			ExportRecord sizingRecord = new ExportRecord(record.id(), payload, now, record.sessionId());
+			int projectedBytes = session.encodeRecord(sizingRecord).length + TICK_FILTER_MEMBERSHIP_OVERHEAD_BYTES;
+			String limitReason = limitReason(session, projectedBytes, now);
 			if (limitReason != null) {
 				RecordingResult result = finishActive(limitReason);
 				VisibleFunction.LOGGER.warn("{}; the current record was not written. {}", limitReason, result.message());
 				return;
 			}
+			session.classify(record);
+			byte[] encoded = session.encodeRecord(record);
 			session.append(record, encoded);
 		} catch (IOException exception) {
 			VisibleFunction.LOGGER.error("VisibleFunction recording {} stopped after write failure", session.id(), exception);
@@ -1081,14 +1087,18 @@ final class VisibleFunctionRecordingManager {
 			return (prefix + VisibleFunctionExportJson.record(record) + "\n").getBytes(StandardCharsets.UTF_8);
 		}
 
+		private void classify(ExportRecord record) {
+			TickFilterEngine.Input<ExportRecord> input = VisibleFunctionExportJson.tickFilterInput(record);
+			TickFilterEngine.AddResult<ExportRecord> result = tickFilter.addDetailed(input);
+			record.setTickFilterMembership(result);
+			currentTick = Math.max(currentTick, input.tick());
+		}
+
 		private void append(ExportRecord record, byte[] encoded) throws IOException {
 			output.write(encoded);
 			bytesWritten += encoded.length;
 			firstRecord = false;
 			recordCount++;
-			TickFilterEngine.Input<ExportRecord> input = VisibleFunctionExportJson.tickFilterInput(record);
-			tickFilter.add(input);
-			currentTick = Math.max(currentTick, input.tick());
 			if (recordCount % RECORDING_FLUSH_INTERVAL == 0) {
 				output.flush();
 			}

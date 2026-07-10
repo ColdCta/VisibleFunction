@@ -1,35 +1,119 @@
-import type { TickFilterBand, TraceRecord } from "../api/types";
-import type { TickFilterBucketPayload } from "../api/types";
+import type { TickFilterBucketPayload, TraceRecord } from "../api/types";
 
-export function tickFilterBandsFromPayload(buckets: TickFilterBucketPayload[]): TickFilterBand[] {
-  return buckets.map((bucket) => ({
-    key: bucket.key,
-    displayName: bucket.displayName,
-    startMillis: bucket.firstSeenTick,
-    endMillis: bucket.lastSeenTick + 1,
-    totalCount: bucket.totalCount,
-    countPerSecond: bucket.countLastSecond,
-    source: bucket.sourceSummary,
-    functionId: functionId(bucket),
-    commandIds: new Set(bucket.commandIds),
-    recordIds: new Set(bucket.recordIds),
-  }));
+export type TickFilterGroup = {
+  groupId: string;
+  bucket: TickFilterBucketPayload;
+  children: TickFilterBucketPayload[];
+  allGroupIds: string[];
+};
+
+export function tickFilterBucketId(bucket: TickFilterBucketPayload): string {
+  return bucket.groupId || bucket.key;
 }
 
-export function isTickFilteredRecord(record: TraceRecord, bands: TickFilterBand[]): boolean {
-  if (bands.length === 0) return false;
-  for (const band of bands) {
-    if (band.recordIds.has(record.id)) return true;
-    const commandId = record.commandContext.commandId;
-    if (commandId && commandId !== "none" && band.commandIds.has(commandId)) return true;
+export function capturedGroupIdsFromBuckets(buckets: TickFilterBucketPayload[]): Set<string> {
+  return new Set(buckets.map(tickFilterBucketId));
+}
+
+export function mergeTickFilterBuckets(
+  current: TickFilterBucketPayload[],
+  incoming: TickFilterBucketPayload[]
+): TickFilterBucketPayload[] {
+  if (incoming.length === 0) return current;
+  const merged = new Map<string, TickFilterBucketPayload>();
+  for (const bucket of current) merged.set(tickFilterBucketId(bucket), bucket);
+  for (const bucket of incoming) merged.set(tickFilterBucketId(bucket), bucket);
+  return Array.from(merged.values()).sort(compareBuckets);
+}
+
+export function tickFilterGroupsFromPayload(buckets: TickFilterBucketPayload[]): TickFilterGroup[] {
+  const sorted = buckets.slice().sort(compareBuckets);
+  const functionParents = new Map<string, TickFilterBucketPayload>();
+  const bucketsById = new Map(sorted.map((bucket) => [tickFilterBucketId(bucket), bucket]));
+
+  for (const bucket of sorted) {
+    const functionId = bucketFunctionId(bucket);
+    if (bucket.type === "FUNCTION" && functionId !== "none") {
+      functionParents.set(functionId, bucket);
+    }
+  }
+
+  const children = new Map<string, TickFilterBucketPayload[]>();
+  const standalone: TickFilterBucketPayload[] = [];
+  for (const bucket of sorted) {
+    if (bucket.type === "FUNCTION") continue;
+    const functionId = bucketFunctionId(bucket);
+    const parent = bucket.parentGroupId
+      ? bucketsById.get(bucket.parentGroupId)
+      : functionParents.get(functionId);
+    if (parent?.type === "FUNCTION") {
+      const parentId = tickFilterBucketId(parent);
+      const list = children.get(parentId) ?? [];
+      list.push(bucket);
+      children.set(parentId, list);
+    } else {
+      standalone.push(bucket);
+    }
+  }
+
+  const groups: TickFilterGroup[] = [];
+  for (const parent of functionParents.values()) {
+    const groupId = tickFilterBucketId(parent);
+    const childBuckets = (children.get(groupId) ?? []).sort(compareBuckets);
+    groups.push({
+      groupId,
+      bucket: parent,
+      children: childBuckets,
+      allGroupIds: [groupId, ...childBuckets.map(tickFilterBucketId)],
+    });
+  }
+  for (const bucket of standalone) {
+    const groupId = tickFilterBucketId(bucket);
+    groups.push({ groupId, bucket, children: [], allGroupIds: [groupId] });
+  }
+  return groups.sort((left, right) => compareBuckets(left.bucket, right.bucket));
+}
+
+export function isTickFilteredRecord(
+  record: TraceRecord,
+  buckets: TickFilterBucketPayload[],
+  capturedGroupIds: Set<string> = capturedGroupIdsFromBuckets(buckets),
+  revealedGroupIds: Set<string> = new Set()
+): boolean {
+  for (const groupId of record.tickFilterGroupIds ?? []) {
+    if (capturedGroupIds.has(groupId) && !revealedGroupIds.has(groupId)) return true;
+  }
+
+  // Protocol-v2 and legacy-recording fallback. A v3 record can also reach this path while a
+  // transition and its periodic snapshot are crossing in flight.
+  for (const bucket of buckets) {
+    const groupId = tickFilterBucketId(bucket);
+    if (revealedGroupIds.has(groupId)) continue;
+    if (recordMatchesTickFilterBucket(record, bucket)) return true;
   }
   return false;
 }
 
-function functionId(bucket: TickFilterBucketPayload): string {
+export function recordMatchesTickFilterBucket(record: TraceRecord, bucket: TickFilterBucketPayload): boolean {
+  const groupId = tickFilterBucketId(bucket);
+  if (record.tickFilterGroupIds?.includes(groupId)) return true;
+  if (bucket.recordIds.includes(record.id)) return true;
+  const commandId = record.commandContext.commandId;
+  return Boolean(commandId && commandId !== "none" && bucket.commandIds.includes(commandId));
+}
+
+export function bucketFunctionId(bucket: TickFilterBucketPayload): string {
+  if (bucket.functionId && bucket.functionId !== "none") return bucket.functionId;
   if (bucket.type === "FUNCTION" && bucket.key.startsWith("FUNCTION:")) {
     return bucket.key.slice("FUNCTION:".length);
   }
   const match = bucket.sourceSummary.match(/(?:tick function|function)\s+(.+)$/);
   return match?.[1] ?? "none";
+}
+
+function compareBuckets(left: TickFilterBucketPayload, right: TickFilterBucketPayload): number {
+  if (left.active !== right.active) return left.active ? -1 : 1;
+  return right.countLastSecond - left.countLastSecond
+    || right.lastSeenTick - left.lastSeenTick
+    || left.displayName.localeCompare(right.displayName);
 }

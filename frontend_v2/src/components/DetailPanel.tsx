@@ -10,6 +10,11 @@ import {
   recordTriggerSource,
   triggerBadge,
 } from "../store/recordNorm";
+import {
+  recordMatchesTickFilterBucket,
+  tickFilterGroupsFromPayload,
+  type TickFilterGroup,
+} from "../store/tickFilter";
 
 export function DetailPanel() {
   const selection = useTraceStore((s) => s.selection);
@@ -20,8 +25,27 @@ export function DetailPanel() {
   const setRange = useTraceStore((s) => s.setRange);
   const viewRange = useTraceStore((s) => s.viewRange);
   const range = useTraceStore((s) => s.range);
+  const tickFilterBuckets = useTraceStore((s) => s.tickFilterBuckets);
+  const revealedTickFilterGroupIds = useTraceStore((s) => s.revealedTickFilterGroupIds);
+  const setTickFilterGroupReveal = useTraceStore((s) => s.setTickFilterGroupReveal);
 
   const { record, related } = useMemo(() => selectSelectedRecord(selection, indexes), [selection, indexes]);
+  const selectedTickFilterGroup = useMemo(() => {
+    if (selection?.kind !== "tickFilterGroup") return null;
+    return tickFilterGroupsFromPayload(tickFilterBuckets)
+      .find((group) => group.groupId === selection.groupId) ?? null;
+  }, [selection, tickFilterBuckets]);
+  const tickFilterGroupRecords = useMemo(() => {
+    if (!selectedTickFilterGroup) return [];
+    const buckets = [selectedTickFilterGroup.bucket, ...selectedTickFilterGroup.children];
+    return records
+      .filter((item) => buckets.some((bucket) => recordMatchesTickFilterBucket(item, bucket)))
+      .slice(-50)
+      .reverse();
+  }, [records, selectedTickFilterGroup]);
+  const tickFilterGroupRevealed = selectedTickFilterGroup?.allGroupIds.some(
+    (groupId) => revealedTickFilterGroupIds.has(groupId)
+  ) ?? false;
   const trigger = record ? recordTriggerSource(record) : null;
 
   // Prev/Next navigate within the current FILTERED result set (docs :598). Use a Map<id,index>
@@ -57,7 +81,15 @@ export function DetailPanel() {
         </button>
       </div>
 
-      {!record ? (
+      {selectedTickFilterGroup ? (
+        <TickFilterGroupDetail
+          group={selectedTickFilterGroup}
+          records={tickFilterGroupRecords}
+          revealed={tickFilterGroupRevealed}
+          onReveal={(reveal) => setTickFilterGroupReveal(selectedTickFilterGroup.allGroupIds, reveal)}
+          onSelectRecord={(id) => setSelection({ kind: "record", id })}
+        />
+      ) : !record ? (
         <div className="detail__empty">
           <div style={{ fontSize: 14, marginBottom: 6 }}>Nothing selected</div>
           <div className="muted" style={{ fontSize: 12 }}>
@@ -162,6 +194,76 @@ export function DetailPanel() {
         </div>
       )}
     </aside>
+  );
+}
+
+function TickFilterGroupDetail({
+  group,
+  records,
+  revealed,
+  onReveal,
+  onSelectRecord,
+}: {
+  group: TickFilterGroup;
+  records: TraceRecord[];
+  revealed: boolean;
+  onReveal: (reveal: boolean) => void;
+  onSelectRecord: (id: number) => void;
+}) {
+  const bucket = group.bucket;
+  return (
+    <div className="detail__body">
+      <div className="detail__title">
+        <span className="detail__diamond">≡</span>
+        Filtered Activity
+      </div>
+      <KV k="Function" v={bucket.functionId || bucket.displayName} mono copyable />
+      <KV k="Reason" v={bucket.reason} />
+      <KV k="State" v={bucket.active ? "active" : "inactive"} mono />
+      <KV k="Current Rate" v={`${bucket.countLastSecond.toLocaleString()}/s`} mono />
+      <KV k="Total" v={bucket.totalCount.toLocaleString()} mono />
+      <KV k="First Tick" v={String(bucket.firstSeenTick)} mono />
+      <KV k="Last Tick" v={String(bucket.lastSeenTick)} mono />
+      <KV k="Child Groups" v={String(group.children.length)} mono />
+
+      <button
+        className={revealed ? "detail__reveal detail__reveal--active" : "detail__reveal"}
+        onClick={() => onReveal(!revealed)}
+      >
+        {revealed ? "Re-hide this group" : "Temporarily show this group's raw records"}
+      </button>
+
+      {group.children.length > 0 && (
+        <div className="detail__section">
+          <div className="detail__section-title">Child Commands / Events ({group.children.length})</div>
+          <div className="detail__list">
+            {group.children.map((child) => (
+              <div key={child.groupId || child.key} className="detail__filter-child">
+                <span className="muted">{child.type}</span>
+                <span className="mono">{child.displayName}</span>
+                <strong className="mono">{child.countLastSecond.toLocaleString()}/s</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="detail__section">
+        <div className="detail__section-title">Recent Raw Records ({records.length})</div>
+        <div className="detail__list">
+          {records.map((item) => (
+            <button
+              key={item.id}
+              className="detail__list-item mono"
+              onClick={() => onSelectRecord(item.id)}
+            >
+              <span className="muted">#{item.id} · Tick {recordTick(item)}</span> {item.subject}
+            </button>
+          ))}
+          {records.length === 0 && <div className="muted detail__list-more">No raw records loaded.</div>}
+        </div>
+      </div>
+    </div>
   );
 }
 

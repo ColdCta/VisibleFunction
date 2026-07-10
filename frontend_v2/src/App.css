@@ -419,7 +419,12 @@
 .recording-card__meta .mono { color: var(--text); }
 .recording-card__file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.buckets { display: flex; flex-direction: column; gap: 0; }
+.buckets {
+  --timeline-column-width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
 
 .buckets__row { display: flex; }
 .buckets__row--header {
@@ -430,7 +435,7 @@
   border-bottom: 1px solid var(--panel-border);
 }
 .bucket__header {
-  flex: 0 0 220px;
+  flex: 0 0 var(--timeline-column-width);
   text-align: center;
   font-size: 12px;
   color: var(--text-muted);
@@ -441,6 +446,9 @@
 }
 .bucket__label-spacer {
   flex: 0 0 200px;
+  position: sticky;
+  left: 0;
+  z-index: 5;
   border-right: 1px solid var(--panel-border);
   background: var(--bg-1);
 }
@@ -465,9 +473,10 @@
 /* Live-edge marker: shown after the current tick when the server has advanced but produced no
    records, so a running-but-silent game reads as "N ticks skipped" instead of a frozen axis. */
 .bucket__idle {
-  flex: 0 0 auto;
-  align-self: center;
-  margin-left: 10px;
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
   padding: 3px 10px;
   font-size: 11px;
   font-family: var(--font-mono);
@@ -494,13 +503,16 @@
   padding: 12px 12px;
   border-right: 1px solid var(--panel-border);
   background: var(--bg-1);
+  position: sticky;
+  left: 0;
+  z-index: 3;
 }
 .lane__icon { font-size: 14px; opacity: 0.85; }
 .lane__title { font-size: 12px; font-weight: 700; letter-spacing: 1px; }
 .lane__subtitle { font-size: 11px; color: var(--text-muted); }
 .lane__grid { display: flex; align-items: stretch; }
 .lane__cell {
-  flex: 0 0 220px;
+  flex: 0 0 var(--timeline-column-width);
   border-left: 1px dashed var(--grid);
   padding: 8px;
   display: flex;
@@ -610,60 +622,73 @@
   text-align: center;
 }
 
-/* === TICK COMMANDS lane (audio-track style) === */
-.lane--tick-commands {
-  min-height: 50px;
-  background: var(--bg-0);
+/* === Filtered activity (independent from horizontal timeline geometry) === */
+.filtered-activity {
+  flex: 0 0 auto;
+  max-height: 220px;
+  border-top: 1px solid var(--panel-border);
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
-.lane--tick-commands .lane__label {
-  background: rgba(255, 93, 93, 0.06);
-  border-right-color: rgba(255, 93, 93, 0.25);
-}
-.lane__grid--continuous {
-  position: relative;
-  overflow: hidden;
-  align-items: stretch;
-}
-.tick-cmd-bar {
-  position: absolute;
-  height: 12px;
-  border-radius: 3px;
-  background: linear-gradient(90deg, rgba(255, 63, 79, 0.92), rgba(255, 63, 79, 0.55));
-  border: 1px solid rgba(255, 105, 116, 0.75);
-  box-shadow: 0 0 8px rgba(255, 63, 79, 0.2);
-  color: #ffd8dc;
-  font-size: 10px;
-  line-height: 10px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.filtered-activity__header {
+  flex: 0 0 48px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 5px;
-  cursor: pointer;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--panel-border);
 }
-.tick-cmd-bar:hover {
-  background: linear-gradient(90deg, rgba(255, 63, 79, 1), rgba(255, 63, 79, 0.7));
+.filtered-activity__title { font-size: 11px; font-weight: 800; letter-spacing: 1px; }
+.filtered-activity__subtitle { margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.filtered-activity__inactive { font-size: 11px; color: var(--text-muted); }
+.filtered-activity__inactive.is-active { color: var(--selected); }
+.filtered-activity__empty { padding: 14px 16px; color: var(--text-muted); font-size: 12px; }
+.filtered-activity__scroll { max-height: 172px; overflow-y: auto; overflow-x: hidden; }
+.filtered-activity__virtual { position: relative; }
+.filtered-activity__virtual-row { position: absolute; left: 0; right: 0; top: 0; }
+.filtered-group {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  border-bottom: 1px solid rgba(255,255,255,0.045);
 }
-.tick-cmd-bar__label {
-  font-family: var(--font-mono);
-  text-overflow: ellipsis;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.tick-cmd-bar__rate {
-  flex: none;
-  margin-left: 6px;
-  opacity: 0.85;
-}
-.tick-cmd-more {
-  position: absolute;
-  left: 4px;
-  color: var(--rec);
+.filtered-group.is-selected { background: rgba(80, 216, 255, 0.09); }
+.filtered-group__toggle { color: var(--text-muted); }
+.filtered-group__main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(180px, 2fr) minmax(120px, 1fr) 64px 80px 64px 110px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 0;
+  text-align: left;
   font-size: 11px;
-  font-family: var(--font-mono);
 }
+.filtered-group__name { color: var(--function); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filtered-group__reason, .filtered-group__children, .filtered-group__total { color: var(--text-muted); }
+.filtered-group__state { color: var(--text-dim); }
+.filtered-group__state.is-active { color: var(--success); }
+.filtered-group__rate { color: var(--rec); text-align: right; }
+.filtered-group__total { text-align: right; }
+.filtered-child {
+  height: 100%;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 92px minmax(180px, 1fr) 80px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 0 46px;
+  text-align: left;
+  background: rgba(255,255,255,0.015);
+  border-bottom: 1px solid rgba(255,255,255,0.035);
+  font-size: 11px;
+}
+.filtered-child:hover { background: rgba(255,255,255,0.045); }
+.filtered-child__type { color: var(--command); }
+.filtered-child__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filtered-child__rate { color: var(--rec); text-align: right; }
 
 /* === Minimap === */
 .minimap {
@@ -1727,6 +1752,25 @@
 
 .detail__nav { display: flex; justify-content: space-between; margin-top: 16px; gap: 8px; }
 .detail__nav button { flex: 1 1 auto; }
+.detail__reveal {
+  width: 100%;
+  margin-top: 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  color: var(--selected);
+  background: rgba(80, 216, 255, 0.08);
+}
+.detail__reveal--active { color: var(--warn); border-color: var(--warn); background: rgba(255, 180, 84, 0.08); }
+.detail__filter-child {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 5px 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  font-size: 11px;
+}
 
 /* === Event relationship graph === */
 .relationship-modal {
