@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class CommandTraceContext {
 	private static final int RETAIN_TICKS = 5;
 	private static final ThreadLocal<String> SOURCE_OVERRIDE = new ThreadLocal<>();
-	private static final ThreadLocal<Boolean> TICK_FUNCTION_DISPATCH = ThreadLocal.withInitial(() -> false);
 	private static final ThreadLocal<TraceContextStack<CommandContext>> ACTIVE_CONTEXTS = ThreadLocal.withInitial(TraceContextStack::new);
 	private static final ThreadLocal<Deque<TriggerContext>> ACTIVE_TRIGGERS = ThreadLocal.withInitial(ArrayDeque::new);
 	private static final java.util.Map<Frame, FunctionFrame> FUNCTION_FRAMES =
@@ -44,14 +43,6 @@ public final class CommandTraceContext {
 
 	public static void clearSourceOverride() {
 		SOURCE_OVERRIDE.remove();
-	}
-
-	public static void enterTickFunctionDispatch() {
-		TICK_FUNCTION_DISPATCH.set(true);
-	}
-
-	public static void exitTickFunctionDispatch() {
-		TICK_FUNCTION_DISPATCH.set(false);
 	}
 
 	public static void markFunctionFrame(Frame frame, Identifier functionId) {
@@ -229,15 +220,9 @@ public final class CommandTraceContext {
 	}
 
 	private static boolean isTickFunctionFrame(Identifier functionId) {
-		if (Boolean.TRUE.equals(TICK_FUNCTION_DISPATCH.get())) {
-			return true;
-		}
-
-		TraceContextStack<CommandContext> activeContexts = ACTIVE_CONTEXTS.get();
-		if (!activeContexts.isEmpty() && "tick function".equals(activeContexts.current().source())) {
-			return true;
-		}
-
+		// TICK identity is defined only by the datapack index (minecraft:tick roots plus its
+		// statically reachable call chain). Do not inherit it merely because runtime execution
+		// happens beneath a TICK frame; that would turn dynamic calls into frequency-like inference.
 		return DatapackTickFunctionIndex.isTickFunction(functionId);
 	}
 

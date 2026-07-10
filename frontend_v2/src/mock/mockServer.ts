@@ -432,7 +432,9 @@ class MockEventSourceImpl {
 
 function generateOne(id: number, ts: number): TraceRecord {
   const fcid = rid();
-  const fn = "wtw:fight_system/on_hit";
+  // Keep a repeating non-TICK command stream in the mock so frequency alone is continuously
+  // exercised as ordinary visible activity.
+  const fn = id % 6 === 1 ? "wtw:ordinary/high_frequency" : MOCK_TICK_FUNCTION;
   const tick = 24095 + Math.floor(id / 20);
   const trigger = mockRuntimeTrigger(fn);
   if (id % 5 === 0) {
@@ -1067,6 +1069,8 @@ function makeGrouped(records: TraceRecord[]): GroupedResponse {
 function applyMockTickFilterMembership(record: TraceRecord) {
   const groupIds: string[] = [];
   if (record.commandContext.function === MOCK_TICK_FUNCTION) {
+    record.commandContext.source = "tick function";
+    if (record.basicFields.source) record.basicFields.source = "tick function";
     groupIds.push(MOCK_FUNCTION_GROUP_ID);
     const commandGroupId = record.type === "COMMAND"
       ? MOCK_COMMAND_GROUPS.get(record.commandContext.command)
@@ -1134,7 +1138,7 @@ function mockBucket(
     totalCount: records.length,
     countLastSecond: records.filter((record) => currentTick - mockRecordTick(record) <= 20).length,
     sourceSummary: `tick function ${MOCK_TICK_FUNCTION}`,
-    reason: "tick function + high frequency",
+    reason: "tick function",
     active: true,
     recordIds: recent.map((record) => record.id),
     commandIds: Array.from(new Set(recent.map((record) => record.commandContext.commandId).filter((id) => id !== "none"))),

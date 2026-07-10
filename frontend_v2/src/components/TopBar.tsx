@@ -24,6 +24,7 @@ export function TopBar() {
   const clientDroppedRecords = useTraceStore((s) => s.clientDroppedRecords);
   const backendDroppedStreamRecords = useTraceStore((s) => s.backendDroppedStreamRecords);
   const backendSlowClientDisconnects = useTraceStore((s) => s.backendSlowClientDisconnects);
+  const recordingLoadWarning = useTraceStore((s) => s.recordingLoadWarning);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [urlDraft, setUrlDraft] = useState(baseUrl);
@@ -47,6 +48,7 @@ export function TopBar() {
           : backendSlowClientDisconnects > 0
             ? `stream reconnects · ${backendSlowClientDisconnects.toLocaleString()} slow client`
             : null;
+  const warningMessage = integrityMessage ?? (mode === "replay" ? recordingLoadWarning : null);
 
   return (
     <header className="topbar">
@@ -106,12 +108,14 @@ export function TopBar() {
         )}
       </div>
 
-      {integrityMessage && (
+      {warningMessage && (
         <div
           className="topbar__warn"
-          title={`Transport drops: ${transportDrops}; slow-client reconnects: ${backendSlowClientDisconnects}`}
+          title={mode === "live"
+            ? `Transport drops: ${transportDrops}; slow-client reconnects: ${backendSlowClientDisconnects}`
+            : warningMessage}
         >
-          {integrityMessage}
+          {warningMessage}
         </div>
       )}
 

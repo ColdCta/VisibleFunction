@@ -313,11 +313,11 @@ function FiltersPanel({
         </label>
         <label className="filter-row" title="Captured groups are always hidden from ordinary lanes. This controls only the aggregate panel.">
           <span style={{ color: "var(--rec)" }}>≡</span>
-          <span style={{ flex: 1 }}>Filtered Activity Panel</span>
+          <span style={{ flex: 1 }}>TICK Activity Panel</span>
           <Switch checked={value.showFilteredActivity} onChange={(v) => onChange({ showFilteredActivity: v })} />
         </label>
         <div className="muted" style={{ padding: "4px 8px", fontSize: 10, lineHeight: 1.4 }}>
-          Captured Tick Function and high-frequency groups are hidden automatically.
+          Statically identified TICK function groups are hidden automatically. Frequency alone is never filtered.
         </div>
       </div>
     </Panel>

@@ -15,7 +15,6 @@
 		"RunFunctionMixin",
 		"ScoreboardCommandMixin",
 		"ServerExecuteCommandMixin",
-		"ServerFunctionManagerMixin",
 		"StorageDataAccessorAccessor",
 		"SummonCommandMixin",
 		"TagCommandMixin",

@@ -14,6 +14,12 @@ import {
 } from "../../store/recordNorm";
 import { FunctionCard } from "./FunctionCard";
 import { FilteredActivityPanel } from "../FilteredActivityPanel";
+import {
+  idleRegionWidth as computeIdleRegionWidth,
+  isIdleTimelineActive,
+  shouldDisableAutoScroll,
+  skippedTicks as computeSkippedTicks,
+} from "../../store/liveTimeline";
 
 const LANE_LABEL_WIDTH = 200;
 const MIN_COLUMN_WIDTH = 120;
@@ -52,7 +58,10 @@ export function Timeline() {
   const mode = useTraceStore((s) => s.mode);
   const paused = useTraceStore((s) => s.paused);
   const liveCurrentTick = useTraceStore((s) => s.liveCurrentTick);
+  const liveActivityTick = useTraceStore((s) => s.liveActivityTick);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const programmedScrollTargetRef = useRef<number | null>(null);
+  const lastScrollLeftRef = useRef(0);
   // Mirrors the scroller's horizontal scroll position via rAF-throttled listener so the minimap's
   // viewport rectangle tracks the native scrollbar (the minimap is read-only — no drag/paging).
   const [scrollState, setScrollState] = useState({ scrollLeft: 0, scrollWidth: 1, clientWidth: 1 });
@@ -62,9 +71,9 @@ export function Timeline() {
     if (mode !== "live" || !autoScroll) return viewRange;
     const configuredSpan = viewRange.max - viewRange.min;
     const span = Number.isFinite(configuredSpan) && configuredSpan > 0 ? configuredSpan : 200;
-    const max = Math.max(liveCurrentTick, range.max);
+    const max = liveActivityTick ?? range.max;
     return { min: Math.max(0, max - span), max };
-  }, [autoScroll, liveCurrentTick, mode, range.max, viewRange]);
+  }, [autoScroll, liveActivityTick, mode, range.max, viewRange]);
 
   const effectiveBucketTicks = useMemo(() => {
     if (bucketMode !== "auto") return bucketMode;
@@ -98,26 +107,31 @@ export function Timeline() {
   const visibleBuckets = vm.buckets;
 
   const currentBucketKey = useMemo(() => {
-    const latestTick = mode === "live" ? Math.max(liveCurrentTick, range.max) : range.max;
+    const latestTick = mode === "live" ? (liveActivityTick ?? range.max) : range.max;
     if (!Number.isFinite(latestTick)) return undefined;
     return String(Math.floor(latestTick / effectiveBucketTicks));
-  }, [effectiveBucketTicks, liveCurrentTick, mode, range.max]);
+  }, [effectiveBucketTicks, liveActivityTick, mode, range.max]);
 
-  // Server ticks elapsed since the newest record, with no events. The backend reports the live
-  // game tick every server tick (health.currentTick), so when the game runs but emits nothing we
-  // can show "N ticks skipped" at the live edge instead of a frozen axis that misleads the user.
+  // Server ticks elapsed since the newest non-TICK activity. Static TICK traffic is deliberately
+  // ignored so its continuous stream cannot move the visible timeline tail.
   const idleTicks = useMemo(() => {
     // Paused freezes ingestion by choice, so records lagging the game tick isn't "no events".
     if (mode !== "live" || paused) return 0;
     if (connection !== "open" && connection !== "reconnecting") return 0;
-    if (!Number.isFinite(range.max) || liveCurrentTick <= 0) return 0;
-    return Math.max(0, liveCurrentTick - range.max);
-  }, [mode, paused, connection, range.max, liveCurrentTick]);
+    const activityTick = liveActivityTick ?? range.max;
+    if (!Number.isFinite(activityTick) || liveCurrentTick <= 0) return 0;
+    return computeSkippedTicks(liveCurrentTick, activityTick);
+  }, [mode, paused, connection, range.max, liveActivityTick, liveCurrentTick]);
+
+  const idleActive = isIdleTimelineActive(mode, autoScroll, paused, connection, idleTicks);
 
   // Horizontal virtualization (docs :791). Only render the columns actually in (or near) the
   // scroll viewport, not every bucket in the view range. All four lanes share the same column
   // geometry, so a single virtualizer drives the slice for every lane.
   const trackViewportWidth = Math.max(1, scrollState.clientWidth - LANE_LABEL_WIDTH - 32);
+  const idleRegionWidth = idleActive
+    ? computeIdleRegionWidth(scrollState.clientWidth, LANE_LABEL_WIDTH, 32)
+    : 0;
   const columnWidth = Math.max(
     MIN_COLUMN_WIDTH,
     Math.min(MAX_COLUMN_WIDTH, Math.floor(trackViewportWidth / Math.max(1, visibleBuckets.length)))
@@ -137,37 +151,55 @@ export function Timeline() {
     if (!autoScroll) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
-    scroller.scrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  }, [autoScroll, visibleBuckets.length, displayRange.max]);
+    const target = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+    programmedScrollTargetRef.current = target;
+    scroller.scrollLeft = target;
+  }, [autoScroll, visibleBuckets.length, displayRange.max, idleRegionWidth]);
 
   // Sync scrollState with the native scrollbar so the read-only minimap viewport follows it.
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller) return;
     let raf = 0;
-    const update = () => {
+    lastScrollLeftRef.current = scroller.scrollLeft;
+    const updateScrollState = () => {
       raf = 0;
       setScrollState({ scrollLeft: scroller.scrollLeft, scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth });
     };
     const onScroll = () => {
+      const currentScrollLeft = scroller.scrollLeft;
+      if (autoScroll && shouldDisableAutoScroll(
+        lastScrollLeftRef.current,
+        currentScrollLeft,
+        programmedScrollTargetRef.current
+      )) {
+        programmedScrollTargetRef.current = null;
+        setAutoScroll(false);
+      } else if (
+        programmedScrollTargetRef.current != null
+        && Math.abs(currentScrollLeft - programmedScrollTargetRef.current) <= 1
+      ) {
+        programmedScrollTargetRef.current = null;
+      }
+      lastScrollLeftRef.current = currentScrollLeft;
       if (raf) return;
-      raf = requestAnimationFrame(update);
+      raf = requestAnimationFrame(updateScrollState);
     };
     scroller.addEventListener("scroll", onScroll, { passive: true });
     // A ResizeObserver keeps the rectangle correct when the grid's content size changes (new
     // buckets / window resizes) even without an explicit scroll event.
     const ro = new ResizeObserver(() => {
       if (raf) return;
-      raf = requestAnimationFrame(update);
+      raf = requestAnimationFrame(updateScrollState);
     });
     ro.observe(scroller);
-    update();
+    updateScrollState();
     return () => {
       scroller.removeEventListener("scroll", onScroll);
       ro.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, []);
+  }, [autoScroll, setAutoScroll]);
 
   function zoom(factor: number) {
     const exactIndex = BUCKET_SIZES.findIndex((b) => b.ticks === effectiveBucketTicks);
@@ -194,7 +226,9 @@ export function Timeline() {
   }
 
   const empty = visibleBuckets.length === 0 || (records.length === 0 && liveCurrentTick <= 0);
-  const totalWidth = colVirtualizer.getTotalSize();
+  const trackWidth = colVirtualizer.getTotalSize();
+  const totalWidth = trackWidth + idleRegionWidth;
+  const visibleCurrentBucketKey = idleActive ? undefined : currentBucketKey;
 
   return (
     <main className="timeline">
@@ -248,44 +282,54 @@ export function Timeline() {
               "--timeline-column-width": `${columnWidth}px`,
             } as React.CSSProperties}
           >
-            {/* Offset spacer so virtualized columns align with their true scroll position. */}
-            <div style={{ position: "absolute", left: 0, top: 0, height: 0, width: colStart }} aria-hidden />
-            <BucketHeaderRow
-              buckets={visibleSlice}
-              bucketTicks={effectiveBucketTicks}
-              currentBucketKey={currentBucketKey}
-              idleTicks={idleTicks}
-              offset={colStart}
-            />
-            <TickLane buckets={visibleSlice} hideIdle={filters.hideIdleTicks} enabled={filters.tick} currentBucketKey={currentBucketKey} offset={colStart} />
-            <EventLane
-              buckets={visibleSlice}
-              onSelect={selectEventGroup}
-              onZoom={(r) => zoomToTick(recordTick(r))}
-              highlightIds={highlightIds}
-              currentBucketKey={currentBucketKey}
-              offset={colStart}
-            />
-            <FunctionLane
-              buckets={visibleSlice}
-              enabled={filters.function}
-              onSelectRecord={(r) => setSelection({ kind: "record", id: r.id })}
-              onSelectCall={(fcid) => setSelection({ kind: "functionCall", functionCallId: fcid })}
-              onZoom={(r) => zoomToTick(recordTick(r))}
-              selection={selection}
-              highlightIds={highlightIds}
-              currentBucketKey={currentBucketKey}
-              offset={colStart}
-            />
-            <CommandLane
-              buckets={visibleSlice}
-              onSelect={(r) => setSelection({ kind: "record", id: r.id })}
-              onZoom={(r) => zoomToTick(recordTick(r))}
-              selection={selection}
-              highlightIds={highlightIds}
-              currentBucketKey={currentBucketKey}
-              offset={colStart}
-            />
+            <div className="buckets__track" style={{ width: trackWidth, minWidth: trackWidth }}>
+              {/* Offset spacer so virtualized columns align with their true scroll position. */}
+              <div style={{ position: "absolute", left: 0, top: 0, height: 0, width: colStart }} aria-hidden />
+              <BucketHeaderRow
+                buckets={visibleSlice}
+                bucketTicks={effectiveBucketTicks}
+                currentBucketKey={visibleCurrentBucketKey}
+                offset={colStart}
+              />
+              <TickLane buckets={visibleSlice} hideIdle={filters.hideIdleTicks} enabled={filters.tick} currentBucketKey={visibleCurrentBucketKey} offset={colStart} />
+              <EventLane
+                buckets={visibleSlice}
+                onSelect={selectEventGroup}
+                onZoom={(r) => zoomToTick(recordTick(r))}
+                highlightIds={highlightIds}
+                currentBucketKey={visibleCurrentBucketKey}
+                offset={colStart}
+              />
+              <FunctionLane
+                buckets={visibleSlice}
+                enabled={filters.function}
+                onSelectRecord={(r) => setSelection({ kind: "record", id: r.id })}
+                onSelectCall={(fcid) => setSelection({ kind: "functionCall", functionCallId: fcid })}
+                onZoom={(r) => zoomToTick(recordTick(r))}
+                selection={selection}
+                highlightIds={highlightIds}
+                currentBucketKey={visibleCurrentBucketKey}
+                offset={colStart}
+              />
+              <CommandLane
+                buckets={visibleSlice}
+                onSelect={(r) => setSelection({ kind: "record", id: r.id })}
+                onZoom={(r) => zoomToTick(recordTick(r))}
+                selection={selection}
+                highlightIds={highlightIds}
+                currentBucketKey={visibleCurrentBucketKey}
+                offset={colStart}
+              />
+            </div>
+            {idleActive && (
+              <div
+                className="timeline__idle-region"
+                style={{ width: idleRegionWidth }}
+                aria-label={`${idleTicks} ticks skipped`}
+              >
+                <span>+{idleTicks.toLocaleString()} TICKS SKIPPED</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -315,13 +359,11 @@ function BucketHeaderRow({
   buckets,
   bucketTicks,
   currentBucketKey,
-  idleTicks,
   offset,
 }: {
   buckets: TimelineBucket[];
   bucketTicks: number;
   currentBucketKey: string | undefined;
-  idleTicks: number;
   offset: number;
 }) {
   return (
@@ -333,14 +375,6 @@ function BucketHeaderRow({
         return (
           <div key={b.key} className={"bucket__header" + (isCurrent ? " bucket__header--current" : "")}>
             {label}
-            {isCurrent && idleTicks > 0 && (
-              <div
-                className="bucket__idle"
-                title={`${idleTicks} server tick${idleTicks === 1 ? "" : "s"} elapsed since the last recorded event`}
-              >
-                ＋{idleTicks.toLocaleString()} tick{idleTicks === 1 ? "" : "s"} skipped · no events
-              </div>
-            )}
           </div>
         );
       })}

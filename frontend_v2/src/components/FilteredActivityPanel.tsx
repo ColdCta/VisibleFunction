@@ -57,7 +57,7 @@ export function FilteredActivityPanel() {
         <div>
           <div className="filtered-activity__title">FILTERED ACTIVITY</div>
           <div className="filtered-activity__subtitle">
-            {active.length} active · {activeRate.toLocaleString()}/s automatically hidden
+            {active.length} active static TICK groups · {activeRate.toLocaleString()}/s hidden
           </div>
         </div>
         <button
@@ -68,7 +68,7 @@ export function FilteredActivityPanel() {
         </button>
       </div>
       {rows.length === 0 ? (
-        <div className="filtered-activity__empty">No captured Tick Function or high-frequency group.</div>
+        <div className="filtered-activity__empty">No statically identified TICK function.</div>
       ) : (
         <div className="filtered-activity__scroll" ref={scrollerRef}>
           <div className="filtered-activity__virtual" style={{ height: virtualizer.getTotalSize() }}>

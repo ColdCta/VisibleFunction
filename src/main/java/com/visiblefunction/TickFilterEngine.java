@@ -17,7 +17,6 @@ import java.util.Set;
 
 final class TickFilterEngine<T> {
 	static final int WINDOW_TICKS = 20;
-	static final int HIGH_FREQUENCY_THRESHOLD = 8;
 	static final int MAX_SAMPLE_RECORDS = 6;
 	static final int MAX_BUCKETS = 4096;
 	private static final int DEFAULT_MAX_RECORD_IDS_PER_BUCKET = 8192;
@@ -50,6 +49,11 @@ final class TickFilterEngine<T> {
 	}
 
 	AddResult<T> addDetailed(Input<T> input) {
+		// TICK membership is a static datapack property. Runtime frequency must never create a
+		// bucket or hide an otherwise ordinary command/event.
+		if (!input.tickFunction()) {
+			return new AddResult<>(false, List.of(), List.of(), List.of());
+		}
 		List<String> groupIds = new ArrayList<>(3);
 		List<String> capturedGroupIds = new ArrayList<>(3);
 		List<Snapshot<T>> newlyCaptured = new ArrayList<>(3);
@@ -85,6 +89,9 @@ final class TickFilterEngine<T> {
 	}
 
 	boolean isCaptured(Input<T> input) {
+		if (!input.tickFunction()) {
+			return false;
+		}
 		for (BucketSpec spec : specs(input)) {
 			MutableBucket<T> bucket = buckets.get(spec.groupId());
 			if (bucket != null && bucket.captured()) {
@@ -95,6 +102,9 @@ final class TickFilterEngine<T> {
 	}
 
 	Snapshot<T> bucketFor(Input<T> input, long currentTick) {
+		if (!input.tickFunction()) {
+			return null;
+		}
 		for (BucketSpec spec : specs(input)) {
 			MutableBucket<T> bucket = buckets.get(spec.groupId());
 			if (bucket != null && bucket.captured()) {
@@ -345,7 +355,6 @@ final class TickFilterEngine<T> {
 		private long endMillis;
 		private long totalCount;
 		private String sourceSummary;
-		private boolean highFrequency;
 		private boolean tickFunction;
 
 		private MutableBucket(BucketSpec spec, Input<T> input, int maxRecordIds, int maxSamples) {
@@ -379,8 +388,6 @@ final class TickFilterEngine<T> {
 				recentCounts.addLast(new TickCount(input.tick(), 1));
 			}
 			pruneRecent(input.tick());
-			highFrequency |= recentCount() >= HIGH_FREQUENCY_THRESHOLD;
-
 			recordIds.add(input.recordId());
 			if (!"none".equals(input.commandId())) {
 				commandIdByRecord.put(input.recordId(), input.commandId());
@@ -421,7 +428,7 @@ final class TickFilterEngine<T> {
 		}
 
 		private boolean captured() {
-			return highFrequency || tickFunction;
+			return tickFunction;
 		}
 
 		private boolean active(long currentTick) {
@@ -455,10 +462,7 @@ final class TickFilterEngine<T> {
 		}
 
 		private String reason() {
-			if (tickFunction && highFrequency) {
-				return "tick function + high frequency";
-			}
-			return tickFunction ? "tick function" : "high frequency";
+			return "tick function";
 		}
 
 		private int recentCount() {

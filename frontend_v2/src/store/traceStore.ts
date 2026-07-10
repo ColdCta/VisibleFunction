@@ -14,9 +14,12 @@ import { DEFAULT_BASE_URL, VisibleFunctionClient, type StreamMessage } from "../
 import { buildIndexes, addToIndexes, type TraceIndexes } from "./traceIndexes";
 import { recordTick } from "./traceTime";
 import type { RelationshipGraphRequest } from "./relationshipGraph";
+import { latestNonTickRecordTick, liveWindowForTick as computeLiveWindowForTick } from "./liveTimeline";
+import { directStaticTickFunctionIds, reclassifyReplayTickData } from "./replayTickClassification";
 import { BoundedBuffer } from "./boundedBuffer";
 import {
   capturedGroupIdsFromBuckets,
+  isStaticTickRecord,
   mergeTickFilterBuckets,
 } from "./tickFilter";
 import {
@@ -126,12 +129,15 @@ type Store = {
   recordings: RecordingMetadata[];
   activeRecording: RecordingMetadata | null;
   recordingLoadError: string | null;
+  recordingLoadWarning: string | null;
   liveSessionId: number | null;
   liveLastVisibleAt: number;
   liveWarmupState: "idle" | "warming" | "ready";
-  // Latest game tick reported by the backend (advances every server tick, even with no records).
-  // The timeline compares it to range.max to show "N ticks skipped (no events)" instead of freezing.
+  // Latest heartbeat tick. The timeline compares it with liveActivityTick while keeping the
+  // activity-anchored range frozen.
   liveCurrentTick: number;
+  liveSessionStartTick: number | null;
+  liveActivityTick: number | null;
   highlightIds: Set<number>;
   relationshipGraphRequest: RelationshipGraphRequest | null;
   settings: SettingsState;
@@ -230,10 +236,13 @@ export const useTraceStore = create<Store>((set, get) => ({
   recordings: [],
   activeRecording: null,
   recordingLoadError: null,
+  recordingLoadWarning: null,
   liveSessionId: null,
   liveLastVisibleAt: Date.now(),
   liveWarmupState: "ready",
   liveCurrentTick: 0,
+  liveSessionStartTick: null,
+  liveActivityTick: null,
   highlightIds: new Set(),
   relationshipGraphRequest: null,
   settings: { baseUrl: DEFAULT_BASE_URL, displayDensity: "comfortable", liveRetentionTicks: DEFAULT_LIVE_RETENTION_TICKS, liveBufferTicks: DEFAULT_LIVE_BUFFER_TICKS },
@@ -267,7 +276,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     try {
       const health = await client.health();
       resetLiveSessionIfNeeded(health.sessionId);
-      set({ liveCurrentTick: health.currentTick ?? 0, ...healthIntegrityPatch(health) });
+      set({ ...liveHeartbeatPatch(health.currentTick ?? 0), ...healthIntegrityPatch(health) });
     } catch {
       // Backend unreachable. Fall back to mock only if the user explicitly pointed at "mock".
       if (get().baseUrl !== "mock") {
@@ -283,7 +292,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       set({ mockMode: true });
       const health = await client.health();
       resetLiveSessionIfNeeded(health.sessionId);
-      set({ liveCurrentTick: health.currentTick ?? 0, ...healthIntegrityPatch(health) });
+      set({ ...liveHeartbeatPatch(health.currentTick ?? 0), ...healthIntegrityPatch(health) });
     }
 
     set({ connection: "open", streamError: false });
@@ -300,11 +309,13 @@ export const useTraceStore = create<Store>((set, get) => ({
       );
       const list = pruneLiveRecords(incoming);
       const range = computeRange(list);
-      const node = traceNode(list, range, lastWindow(range));
+      const latestActivityTick = latestNonTickRecordTick(list, get().tickFilterBuckets);
+      const liveActivityTick = latestActivityTick ?? get().liveActivityTick ?? get().liveSessionStartTick ?? range.max;
+      const node = traceNode(list, range, liveWindowForTick(liveActivityTick));
       if (get().mode === "live") {
-        set({ liveNode: node, ...node, pendingRecords: [], capturedTickFilterGroupIds, ...traceIntegrityPatch() });
+        set({ liveNode: node, ...node, pendingRecords: [], capturedTickFilterGroupIds, liveActivityTick, ...traceIntegrityPatch() });
       } else {
-        set({ liveNode: node, pendingRecords: [], capturedTickFilterGroupIds, ...traceIntegrityPatch() });
+        set({ liveNode: node, pendingRecords: [], capturedTickFilterGroupIds, liveActivityTick, ...traceIntegrityPatch() });
       }
     } catch {
       /* keep last good data visible (docs :784) */
@@ -320,10 +331,10 @@ export const useTraceStore = create<Store>((set, get) => ({
           for (const record of msg.records) get().ingestRecord(record);
         } else if (msg.type === "hello") {
           resetLiveSessionIfNeeded(msg.sessionId);
-          set({ liveCurrentTick: msg.currentTick ?? 0, ...healthIntegrityPatch(msg) });
+          set({ ...liveHeartbeatPatch(msg.currentTick ?? 0), ...healthIntegrityPatch(msg) });
         } else if (msg.type === "tick") {
           resetLiveSessionIfNeeded(msg.sessionId);
-          set({ liveCurrentTick: msg.currentTick });
+          set(liveHeartbeatPatch(msg.currentTick));
         } else if (msg.type === "tickFilter") {
           const tickFilterBuckets = mergeTickFilterBuckets(get().tickFilterBuckets, msg.tickFilter);
           const capturedTickFilterGroupIds = mergeCapturedGroupIds(
@@ -400,6 +411,8 @@ export const useTraceStore = create<Store>((set, get) => ({
       tickFilterBuckets: [],
       capturedTickFilterGroupIds: new Set(),
       revealedTickFilterGroupIds: new Set(),
+      liveSessionStartTick: get().liveCurrentTick,
+      liveActivityTick: get().liveCurrentTick,
       relationshipGraphRequest: null,
     });
     pendingIds.clear();
@@ -408,7 +421,10 @@ export const useTraceStore = create<Store>((set, get) => ({
 
   setAutoScroll(v) {
     const range = get().range;
-    const viewRange = v ? lastWindow(range) : get().viewRange;
+    const activityTick = get().liveActivityTick ?? range.max;
+    const viewRange = v && get().mode === "live"
+      ? liveWindowForTick(activityTick, get().viewRange)
+      : v ? lastWindow(range) : get().viewRange;
     const nodeKey = activeNodeKey(get().mode);
     set({ autoScroll: v, viewRange, [nodeKey]: { ...get()[nodeKey], viewRange } });
   },
@@ -494,6 +510,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       mode: "live" as const,
       activeRecording: null,
       recordingLoadError: null,
+      recordingLoadWarning: null,
       revealedTickFilterGroupIds: new Set<string>(),
       relationshipGraphRequest: null,
       liveWarmupState: shouldWarm ? "warming" as const : "ready" as const,
@@ -521,6 +538,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       paused: false,
       activeRecording: null,
       recordingLoadError: null,
+      recordingLoadWarning: null,
       revealedTickFilterGroupIds: new Set(),
       ...empty,
       pendingRecords: [],
@@ -571,19 +589,21 @@ export const useTraceStore = create<Store>((set, get) => ({
       return;
     }
     stopLiveStream();
-    set({ recordingLoadError: null });
-    let payload;
-    try {
-      payload = await get().client.recording(rec.id);
-    } catch {
+    set({ recordingLoadError: null, recordingLoadWarning: null });
+    const [recordingResult, analysisResult] = await Promise.allSettled([
+      get().client.recording(rec.id),
+      get().client.datapackAnalysis(),
+    ]);
+    if (recordingResult.status === "rejected") {
       set({ recordingLoadError: `Failed to load recording ${rec.id}.` });
       return;
     }
+    const payload = recordingResult.value;
     if (!payload.recording) {
       set({ recordingLoadError: `Recording ${rec.id} is no longer available.` });
       return;
     }
-    const list = dedupeById(
+    const rawList = dedupeById(
       payload.records ?? [
         ...payload.data.commands,
         ...payload.data.events,
@@ -591,11 +611,20 @@ export const useTraceStore = create<Store>((set, get) => ({
         ...payload.data.other,
       ]
     ).sort((a, b) => a.id - b.id);
-    const tickFilterBuckets = payload.data.tickFilter ?? [];
-    const capturedTickFilterGroupIds = mergeCapturedGroupIds(
-      capturedGroupIdsFromBuckets(tickFilterBuckets),
-      capturedGroupIdsFromRecords(list)
+    const eligibleFunctionIds = analysisResult.status === "fulfilled"
+      ? directStaticTickFunctionIds(analysisResult.value)
+      : new Set<string>();
+    const classification = reclassifyReplayTickData(
+      rawList,
+      payload.data.tickFilter ?? [],
+      eligibleFunctionIds
     );
+    const list = classification.records;
+    const tickFilterBuckets = classification.buckets;
+    const capturedTickFilterGroupIds = capturedGroupIdsFromBuckets(tickFilterBuckets);
+    const recordingLoadWarning = analysisResult.status === "rejected"
+      ? "Static TICK re-evaluation unavailable; showing raw replay records."
+      : null;
     const range = computeRange(list);
     const node = traceNode(list, range, replayInitialWindow(list, range));
     set({
@@ -611,6 +640,7 @@ export const useTraceStore = create<Store>((set, get) => ({
       revealedTickFilterGroupIds: new Set(),
       relationshipGraphRequest: null,
       recordingLoadError: null,
+      recordingLoadWarning,
     });
     pendingIds.clear();
     clearPendingBuffer();
@@ -665,7 +695,7 @@ export const useTraceStore = create<Store>((set, get) => ({
     try {
       const health = await state.client.health();
       resetLiveSessionIfNeeded(health.sessionId);
-      set({ liveCurrentTick: health.currentTick ?? 0, ...healthIntegrityPatch(health) });
+      set({ ...liveHeartbeatPatch(health.currentTick ?? 0), ...healthIntegrityPatch(health) });
     } catch {
       /* ignore; next tick retries */
     }
@@ -678,16 +708,21 @@ export const useTraceStore = create<Store>((set, get) => ({
   ingestRecord(r) {
     const cur = get();
     if (cur.paused) return;
+    const staticTickRecord = isStaticTickRecord(r, cur.tickFilterBuckets);
     const capturedTickFilterGroupIds = mergeCapturedGroupIds(
       cur.capturedTickFilterGroupIds,
-      new Set(r.capturedTickFilterGroupIds ?? [])
+      staticTickRecord ? new Set(r.capturedTickFilterGroupIds ?? []) : new Set()
     );
     const capturedChanged = capturedTickFilterGroupIds.size !== cur.capturedTickFilterGroupIds.size;
+    const recordActivityTick = staticTickRecord
+      ? cur.liveActivityTick
+      : Math.max(cur.liveActivityTick ?? recordTick(r), recordTick(r));
+    const activityChanged = recordActivityTick !== cur.liveActivityTick;
     const integrityChanged = observeRecordIntegrity(r.id);
     const liveIndexes = cur.mode === "live" ? cur.indexes : cur.liveNode.indexes;
     if (liveIndexes.recordsById.has(r.id) || pendingIds.has(r.id)) {
-      if (integrityChanged || capturedChanged) {
-        set({ ...traceIntegrityPatch(), capturedTickFilterGroupIds });
+      if (integrityChanged || capturedChanged || activityChanged) {
+        set({ ...traceIntegrityPatch(), capturedTickFilterGroupIds, liveActivityTick: recordActivityTick });
       }
       return;
     }
@@ -698,8 +733,8 @@ export const useTraceStore = create<Store>((set, get) => ({
       liveTraceGaps = addTraceGap(liveTraceGaps, dropped.id, dropped.id);
       clientDroppedRecords++;
     }
-    if (integrityChanged || dropped || capturedChanged) {
-      set({ ...traceIntegrityPatch(), capturedTickFilterGroupIds });
+    if (integrityChanged || dropped || capturedChanged || activityChanged) {
+      set({ ...traceIntegrityPatch(), capturedTickFilterGroupIds, liveActivityTick: recordActivityTick });
     }
     scheduleFlush();
   },
@@ -808,10 +843,14 @@ function flushPending() {
   // clamp the visible range to the retention window ending at the latest tick. Records in the
   // buffer are still queryable via indexes/selection, just outside the rendered timeline. Replay
   // mode shows the full recording range.
+  const rangeAnchor = cur.liveActivityTick ?? fullRange.max;
   const nr = cur.mode === "live"
-    ? { min: Math.max(fullRange.min, fullRange.max - cur.settings.liveRetentionTicks), max: fullRange.max }
+    ? { min: Math.max(fullRange.min, rangeAnchor - cur.settings.liveRetentionTicks), max: fullRange.max }
     : fullRange;
-  const newView = cur.autoScroll ? lastWindow(nr) : clampViewRange(baseViewRange, nr);
+  const activityTick = cur.liveActivityTick ?? cur.liveSessionStartTick ?? nr.max;
+  const newView = cur.autoScroll && cur.mode === "live"
+    ? liveWindowForTick(activityTick, baseViewRange)
+    : cur.autoScroll ? lastWindow(nr) : clampViewRange(baseViewRange, nr);
   const finalIndexes = trimmed || reordered ? buildIndexes(merged) : indexes;
   const selection = sanitizeSelection(cur.selection, finalIndexes);
   const highlightIds = selection === cur.selection ? cur.highlightIds : new Set<number>();
@@ -920,18 +959,36 @@ function dedupeById(records: TraceRecord[]): TraceRecord[] {
 // which clamps the visible range to the retention window).
 function pruneLiveRecords(records: TraceRecord[]): TraceRecord[] {
   if (records.length === 0) return records;
-  const { liveRetentionTicks, liveBufferTicks } = useTraceStore.getState().settings;
+  const state = useTraceStore.getState();
+  const { liveRetentionTicks, liveBufferTicks } = state.settings;
   const keepTicks = liveRetentionTicks + liveBufferTicks;
   let latest = -Infinity;
   for (const r of records) {
     const t = recordTick(r);
     if (t > latest) latest = t;
   }
-  const cutoff = latest - keepTicks;
-  const retained = records.filter((r) => recordTick(r) >= cutoff);
-  return retained.length > MAX_LIVE_RECORDS
-    ? retained.slice(retained.length - MAX_LIVE_RECORDS)
-    : retained;
+  const recentCutoff = latest - keepTicks;
+  const recent = records.filter((record) => recordTick(record) >= recentCutoff);
+  const activityTick = state.liveActivityTick;
+  if (activityTick == null || latest - activityTick <= keepTicks) {
+    return recent.length > MAX_LIVE_RECORDS
+      ? recent.slice(recent.length - MAX_LIVE_RECORDS)
+      : recent;
+  }
+
+  // During a long static-TICK-only idle period, retain both the newest raw TICK samples and the
+  // frozen activity window. Otherwise ordinary cards at the visual anchor would disappear while
+  // the axis correctly remained stationary.
+  const activityCutoff = activityTick - keepTicks;
+  const activity = records.filter((record) => {
+    const tick = recordTick(record);
+    return tick >= activityCutoff && tick <= activityTick;
+  });
+  const budget = Math.floor(MAX_LIVE_RECORDS / 2);
+  const merged = new Map<number, TraceRecord>();
+  for (const record of activity.slice(-budget)) merged.set(record.id, record);
+  for (const record of recent.slice(-(MAX_LIVE_RECORDS - merged.size))) merged.set(record.id, record);
+  return Array.from(merged.values()).sort((left, right) => left.id - right.id);
 }
 
 function computeRange(records: TraceRecord[]): { min: number; max: number } {
@@ -1098,6 +1155,8 @@ function resetLiveSessionIfNeeded(sessionId: number) {
     capturedTickFilterGroupIds: new Set(),
     revealedTickFilterGroupIds: new Set(),
     liveCurrentTick: 0,
+    liveSessionStartTick: null,
+    liveActivityTick: null,
     relationshipGraphRequest: null,
     traceGaps: [],
     clientDroppedRecords: 0,
@@ -1134,12 +1193,30 @@ function healthIntegrityPatch(health: HealthResponse): Partial<Store> {
   };
 }
 
+function liveHeartbeatPatch(currentTick: number): Pick<Store, "liveCurrentTick" | "liveSessionStartTick" | "liveActivityTick"> {
+  const state = useTraceStore.getState();
+  const liveSessionStartTick = state.liveSessionStartTick ?? currentTick;
+  return {
+    liveCurrentTick: currentTick,
+    liveSessionStartTick,
+    liveActivityTick: state.liveActivityTick ?? liveSessionStartTick,
+  };
+}
+
 function capturedGroupIdsFromRecords(records: TraceRecord[]): Set<string> {
   const captured = new Set<string>();
   for (const record of records) {
+    if (record.commandContext.source !== "tick function") continue;
     for (const groupId of record.capturedTickFilterGroupIds ?? []) captured.add(groupId);
   }
   return captured;
+}
+
+function liveWindowForTick(
+  tick: number,
+  previous?: { min: number; max: number }
+): { min: number; max: number } {
+  return computeLiveWindowForTick(tick, previous, DEFAULT_VIEW_WINDOW_TICKS);
 }
 
 function mergeCapturedGroupIds(current: Set<string>, incoming: Set<string>): Set<string> {

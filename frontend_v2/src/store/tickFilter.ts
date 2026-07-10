@@ -12,7 +12,7 @@ export function tickFilterBucketId(bucket: TickFilterBucketPayload): string {
 }
 
 export function capturedGroupIdsFromBuckets(buckets: TickFilterBucketPayload[]): Set<string> {
-  return new Set(buckets.map(tickFilterBucketId));
+  return new Set(buckets.filter(isStaticTickFilterBucket).map(tickFilterBucketId));
 }
 
 export function mergeTickFilterBuckets(
@@ -27,7 +27,7 @@ export function mergeTickFilterBuckets(
 }
 
 export function tickFilterGroupsFromPayload(buckets: TickFilterBucketPayload[]): TickFilterGroup[] {
-  const sorted = buckets.slice().sort(compareBuckets);
+  const sorted = buckets.filter(isStaticTickFilterBucket).sort(compareBuckets);
   const functionParents = new Map<string, TickFilterBucketPayload>();
   const bucketsById = new Map(sorted.map((bucket) => [tickFilterBucketId(bucket), bucket]));
 
@@ -80,18 +80,35 @@ export function isTickFilteredRecord(
   capturedGroupIds: Set<string> = capturedGroupIdsFromBuckets(buckets),
   revealedGroupIds: Set<string> = new Set()
 ): boolean {
+  const staticBuckets = buckets.filter(isStaticTickFilterBucket);
+  const staticBucketIds = new Set(staticBuckets.map(tickFilterBucketId));
   for (const groupId of record.tickFilterGroupIds ?? []) {
-    if (capturedGroupIds.has(groupId) && !revealedGroupIds.has(groupId)) return true;
+    const staticallyIdentified = staticBucketIds.has(groupId) || record.commandContext.source === "tick function";
+    if (staticallyIdentified && capturedGroupIds.has(groupId) && !revealedGroupIds.has(groupId)) return true;
   }
 
   // Protocol-v2 and legacy-recording fallback. A v3 record can also reach this path while a
   // transition and its periodic snapshot are crossing in flight.
-  for (const bucket of buckets) {
+  for (const bucket of staticBuckets) {
     const groupId = tickFilterBucketId(bucket);
     if (revealedGroupIds.has(groupId)) continue;
     if (recordMatchesTickFilterBucket(record, bucket)) return true;
   }
-  return false;
+  // Old protocol/recording records may not carry memberships, but their source was persisted from
+  // the static datapack classification performed at capture time.
+  return record.commandContext.source === "tick function"
+    && !(record.tickFilterGroupIds ?? []).some((groupId) => revealedGroupIds.has(groupId));
+}
+
+export function isStaticTickRecord(record: TraceRecord, buckets: TickFilterBucketPayload[]): boolean {
+  if (record.commandContext.source === "tick function") return true;
+  return buckets.some((bucket) => isStaticTickFilterBucket(bucket) && recordMatchesTickFilterBucket(record, bucket));
+}
+
+export function isStaticTickFilterBucket(bucket: TickFilterBucketPayload): boolean {
+  const reason = bucket.reason.toLowerCase();
+  const source = bucket.sourceSummary.toLowerCase();
+  return reason.includes("tick function") || source.startsWith("tick function");
 }
 
 export function recordMatchesTickFilterBucket(record: TraceRecord, bucket: TickFilterBucketPayload): boolean {

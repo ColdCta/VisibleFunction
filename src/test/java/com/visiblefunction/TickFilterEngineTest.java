@@ -20,35 +20,29 @@ class TickFilterEngineTest {
 	}
 
 	@Test
-	void highFrequencyUsesCountsPerTickInsteadOfOneQueueEntryPerRecord() {
+	void highFrequencyWithoutStaticTickIdentityIsNeverCaptured() {
 		TickFilterEngine<String> engine = new TickFilterEngine<>();
-		for (int index = 0; index < TickFilterEngine.HIGH_FREQUENCY_THRESHOLD; index++) {
-			engine.add(input(index + 1, 10, false, "none"));
+		for (int index = 0; index < 100; index++) {
+			var result = engine.addDetailed(input(index + 1, 10, false, "none"));
+			assertFalse(result.captured());
+			assertTrue(result.groupIds().isEmpty());
+			assertTrue(result.newlyCaptured().isEmpty());
 		}
-
-		var bucket = engine.snapshots(10).getFirst();
-		assertEquals(TickFilterEngine.HIGH_FREQUENCY_THRESHOLD, bucket.countLastSecond());
-		assertEquals("high frequency", bucket.reason());
+		assertTrue(engine.snapshots(10).isEmpty());
 	}
 
 	@Test
-	void eighthRecordProducesOneTransitionAndEarlierRecordsShareTheGroupId() {
+	void staticTickProducesOneTransitionOnTheFirstRecord() {
 		TickFilterEngine<String> engine = new TickFilterEngine<>();
-		String groupId = null;
-		for (int index = 0; index < TickFilterEngine.HIGH_FREQUENCY_THRESHOLD; index++) {
-			var result = engine.addDetailed(input(index + 1, index, false, "none"));
-			assertEquals(1, result.groupIds().size());
-			if (groupId == null) {
-				groupId = result.groupIds().getFirst();
-			}
-			assertEquals(groupId, result.groupIds().getFirst());
-			assertEquals(index == TickFilterEngine.HIGH_FREQUENCY_THRESHOLD - 1 ? 1 : 0, result.newlyCaptured().size());
-		}
+		var first = engine.addDetailed(input(1, 1, true, "demo:tick"));
+		assertTrue(first.captured());
+		assertEquals(2, first.groupIds().size());
+		assertEquals(2, first.newlyCaptured().size());
 
-		var ninth = engine.addDetailed(input(9, 9, false, "none"));
-		assertTrue(ninth.captured());
-		assertTrue(ninth.newlyCaptured().isEmpty());
-		assertEquals(groupId, ninth.capturedGroupIds().getFirst());
+		var second = engine.addDetailed(input(2, 2, true, "demo:tick"));
+		assertTrue(second.captured());
+		assertEquals(first.groupIds(), second.groupIds());
+		assertTrue(second.newlyCaptured().isEmpty());
 	}
 
 	@Test
@@ -79,11 +73,11 @@ class TickFilterEngineTest {
 	void removingRetainedRecordDropsItsMembership() {
 		TickFilterEngine<String> engine = new TickFilterEngine<>();
 		for (int index = 0; index < 8; index++) {
-			engine.add(input(index + 1, index, false, "none"));
+			engine.add(input(index + 1, index, true, "demo:tick"));
 		}
 		engine.removeRecord(1);
 
-		assertFalse(engine.snapshots(8).getFirst().recordIds().contains(1L));
+		assertTrue(engine.snapshots(8).stream().noneMatch(bucket -> bucket.recordIds().contains(1L)));
 	}
 
 	private static TickFilterEngine.Input<String> input(long id, long tick, boolean tickFunction, String function) {

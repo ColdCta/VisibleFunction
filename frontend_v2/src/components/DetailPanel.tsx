@@ -215,7 +215,7 @@ function TickFilterGroupDetail({
     <div className="detail__body">
       <div className="detail__title">
         <span className="detail__diamond">≡</span>
-        Filtered Activity
+        TICK Activity
       </div>
       <KV k="Function" v={bucket.functionId || bucket.displayName} mono copyable />
       <KV k="Reason" v={bucket.reason} />

@@ -73,6 +73,28 @@ class VisibleFunctionRecordingManagerTest {
 	}
 
 	@Test
+	void recordingDoesNotClassifyOrdinaryHighFrequencyCommands() {
+		VisibleFunctionRecordingManager manager = new VisibleFunctionRecordingManager(
+			directory,
+			Clock.systemUTC(),
+			() -> "ordinary-frequency"
+		);
+		assertTrue(manager.start().success());
+		for (int tick = 0; tick < 20; tick++) {
+			manager.publish(payload(tick));
+		}
+		assertTrue(manager.stop().success());
+
+		var recording = JsonParser.parseString(manager.latestRecordingJson()).getAsJsonObject();
+		for (var recordElement : recording.getAsJsonArray("records")) {
+			var record = recordElement.getAsJsonObject();
+			assertTrue(record.getAsJsonArray("tickFilterGroupIds").isEmpty());
+			assertTrue(record.getAsJsonArray("capturedTickFilterGroupIds").isEmpty());
+		}
+		assertTrue(recording.getAsJsonObject("data").getAsJsonArray("tickFilter").isEmpty());
+	}
+
+	@Test
 	void interruptedJournalRecoversCompleteLinesOnly() throws Exception {
 		String id = "20260705-120000-000-deadbeef";
 		Path journal = directory.resolve("visiblefunction-recording-" + id + ".journal.tmp");

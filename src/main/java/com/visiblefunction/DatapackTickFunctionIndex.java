@@ -244,14 +244,16 @@ final class DatapackTickFunctionIndex {
 		}
 	}
 
-	private static FunctionReference functionReference(String rawLine) {
+	static FunctionReference functionReference(String rawLine) {
 		String line = rawLine.strip();
 		if (line.isBlank() || line.startsWith("#") || line.startsWith("$")) {
 			return null;
 		}
 
-		String effective = CommandText.effectiveCommand(line);
-		List<String> tokens = CommandText.tokenize(effective);
+		// Static TICK identity propagates only through a top-level function statement. An execute
+		// wrapper can be conditional, fan out over a selector, or depend on runtime context, so its
+		// target must stay visible as ordinary activity even when the caller itself is a tick root.
+		List<String> tokens = CommandText.tokenize(line);
 		if (tokens.size() < 2 || !"function".equals(tokens.getFirst().toLowerCase(Locale.ROOT))) {
 			return null;
 		}
@@ -265,7 +267,7 @@ final class DatapackTickFunctionIndex {
 	private record TagEntry(String id, boolean required) {
 	}
 
-	private record FunctionReference(Identifier id, boolean tag) {
+	record FunctionReference(Identifier id, boolean tag) {
 	}
 
 	private record TickIndex(Set<String> tickRoots, Set<String> tickFunctions) {

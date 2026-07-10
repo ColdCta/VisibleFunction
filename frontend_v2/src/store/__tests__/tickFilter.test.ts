@@ -18,7 +18,7 @@ function bucket(over: Partial<TickFilterBucketPayload> = {}): TickFilterBucketPa
     totalCount: 21,
     countLastSecond: 20,
     sourceSummary: "tick function demo:tick",
-    reason: "tick function + high frequency",
+    reason: "tick function",
     active: true,
     recordIds: [1, 2],
     commandIds: ["c1"],
@@ -49,18 +49,32 @@ describe("isTickFilteredRecord", () => {
   });
 
   it("uses protocol-v3 group membership before legacy ids", () => {
-    const record = makeRecord({ id: 99, tickFilterGroupIds: ["group-a"] });
+    const record = makeRecord({
+      id: 99,
+      tickFilterGroupIds: ["group-a"],
+      commandContext: { source: "tick function" },
+    });
     expect(isTickFilteredRecord(record, [], new Set(["group-a"]), new Set())).toBe(true);
     expect(isTickFilteredRecord(record, [], new Set(["group-a"]), new Set(["group-a"]))).toBe(false);
   });
 
   it("reveals only the selected parent and child group ids", () => {
-    const selected = makeRecord({ id: 90, tickFilterGroupIds: ["child-a"] });
-    const other = makeRecord({ id: 91, tickFilterGroupIds: ["group-b"] });
+    const selected = makeRecord({ id: 90, tickFilterGroupIds: ["child-a"], commandContext: { source: "tick function" } });
+    const other = makeRecord({ id: 91, tickFilterGroupIds: ["group-b"], commandContext: { source: "tick function" } });
     const captured = new Set(["parent-a", "child-a", "group-b"]);
     const revealed = new Set(["parent-a", "child-a"]);
     expect(isTickFilteredRecord(selected, [], captured, revealed)).toBe(false);
     expect(isTickFilteredRecord(other, [], captured, revealed)).toBe(true);
+  });
+
+  it("ignores legacy buckets captured only because of high frequency", () => {
+    const legacyHighFrequency = bucket({
+      sourceSummary: "function demo:loop",
+      reason: "high frequency",
+    });
+    const record = makeRecord({ id: 1, commandContext: { commandId: "c1", source: "function" } });
+    expect(isTickFilteredRecord(record, [legacyHighFrequency])).toBe(false);
+    expect(tickFilterGroupsFromPayload([legacyHighFrequency])).toEqual([]);
   });
 });
 

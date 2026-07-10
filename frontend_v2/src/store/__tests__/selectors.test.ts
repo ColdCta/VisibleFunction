@@ -23,8 +23,11 @@ describe("selectViewModel", () => {
     expect(model.buckets[0].startTick).toBe(0);
   });
 
-  it("retroactively hides records after a captured group transition without collapsing the grid", () => {
-    const records = [commandAtTick(1, 120, { tickFilterGroupIds: ["group-a"] })];
+  it("hides a statically identified TICK record immediately without collapsing the grid", () => {
+    const records = [commandAtTick(1, 120, {
+      tickFilterGroupIds: ["group-a"],
+      commandContext: { source: "tick function" },
+    })];
     const before = selectViewModel(
       records,
       buildIndexes(records),
@@ -46,7 +49,7 @@ describe("selectViewModel", () => {
       new Set()
     );
 
-    expect(before.filtered).toHaveLength(1);
+    expect(before.filtered).toHaveLength(0);
     expect(after.filtered).toHaveLength(0);
     expect(after.buckets).toHaveLength(10);
     expect(after.buckets.map((bucket) => bucket.startTick)).toEqual([100, 120, 140, 160, 180, 200, 220, 240, 260, 280]);

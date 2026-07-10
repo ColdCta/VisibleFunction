@@ -35,9 +35,7 @@ class VisibleFunctionExportServerTest {
 			assertTrue(events.containsKey("hello"));
 
 			server.tick(5);
-			for (int index = 0; index < TickFilterEngine.HIGH_FREQUENCY_THRESHOLD; index++) {
-				server.publish(payload(index + 1));
-			}
+			server.publish(payload(1));
 
 			while (!events.containsKey("tick") || !events.containsKey("tick-filter")
 				|| (!events.containsKey("record") && !events.containsKey("records"))) {
@@ -49,7 +47,7 @@ class VisibleFunctionExportServerTest {
 			assertEquals(5, tick.get("currentTick").getAsLong());
 			var transition = JsonParser.parseString(events.get("tick-filter")).getAsJsonObject()
 				.getAsJsonArray("tickFilter");
-			assertEquals(1, transition.size());
+			assertEquals(2, transition.size());
 			assertTrue(transition.get(0).getAsJsonObject().has("groupId"));
 		} finally {
 			server.stop();
@@ -89,7 +87,7 @@ class VisibleFunctionExportServerTest {
 			"say hi",
 			"executed",
 			"- tick: " + tick + "\n- command: say hi\n- command_id: command-" + tick
-				+ "\n- source: player\n- function: none\n",
+				+ "\n- source: tick function\n- function: demo:tick\n",
 			"- tick: " + tick + "\n"
 		);
 	}
